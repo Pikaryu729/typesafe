@@ -288,6 +288,91 @@ Known and deliberate for v1. Worth understanding before putting this somewhere p
 The last two matter mainly if you expose this to the open internet. Restricting the port to a
 VPN or a known set of addresses sidesteps both.
 
+### Google Cloud (Compute Engine)
+
+Everything above applies unchanged on a GCE VM — the build, the service user, the systemd unit.
+This section covers only what is specific to Google Cloud. It has been run end to end.
+
+**Use Compute Engine, not Cloud Run.** typesafe is an SSH server on a raw TCP port. Cloud Run
+serves HTTP, gRPC and WebSockets only, with no raw TCP ingress, so it cannot host this at all —
+the same goes for App Engine. GKE would work via a TCP `LoadBalancer` service, but a Kubernetes
+cluster to run one 6 MB single-process binary is not a trade worth making. A single small VM is
+the right shape, and it has to be a *single* VM: all state is in memory and lobbies live in one
+process, so two instances behind a load balancer would silently hide players from each other.
+
+An `e2-micro` is plenty. Measured: ~6.7 MB resident idle, ~400 KB per session.
+
+#### One command
+
+```sh
+PROJECT=your-project-id BILLING=0X0X0X-0X0X0X-0X0X0X ./deploy/gcp.sh
+```
+
+It creates the project if needed, enables the APIs, sets up the firewall, creates the VM,
+promotes its address to a static one, builds and uploads the binary, installs the systemd unit,
+and backs up the host key. Re-running it rebuilds and restarts the service in place — that is
+the upgrade path, and it is safe to run against a live deployment.
+
+Useful variables: `REGION`, `ZONES`, `MACHINE`, `PORT`, `INSTANCE`, and `SOURCE_RANGE`
+(who may connect — defaults to your current public IP only).
+
+#### The four Google-specific traps
+
+**Do not give typesafe port 22.** On GCE that is how you administer the box. The "Running on
+port 22" section above is explicitly *not* for GCE: taking 22 means fighting the VM's own
+`sshd`, and locking yourself out of a cloud VM is a bad afternoon. Stay on 2222.
+
+**The default VPC blocks your port.** A fresh project allows only `22`, `3389` and ICMP
+inbound. Without an explicit rule the server looks completely dead from outside while running
+perfectly on the VM — the single most likely reason a first deploy appears broken. The script
+adds a rule scoped by network tag, and narrows the default `tcp:22` rule from `0.0.0.0/0` to
+IAP's range (`35.235.240.0/20`) so admin SSH is not exposed. Administer the box with
+`gcloud compute ssh <instance> --tunnel-through-iap`.
+
+**`e2-micro` capacity runs out.** It is the free-tier shape and therefore contended: during this
+deployment *all four* `us-central1` zones refused with "does not have enough resources
+available". The script walks a list of zones rather than failing on the first. If a whole region
+is exhausted, set `REGION`/`ZONES` to another (`us-east1`, `us-west1` and `us-central1` are the
+free-tier regions).
+
+**A rebuilt VM loses its host key**, which lives on the boot disk under `/var/lib/typesafe`.
+Every returning user would then hit `REMOTE HOST IDENTIFICATION HAS CHANGED` and be refused.
+The script copies the key into Secret Manager on first deploy. To restore it onto a fresh VM:
+
+```sh
+gcloud secrets versions access latest --secret=typesafe-host-key \
+  | gcloud compute ssh <instance> --tunnel-through-iap \
+      --command 'sudo install -m 600 -o typesafe -g typesafe /dev/stdin /var/lib/typesafe/host_ed25519'
+gcloud compute ssh <instance> --tunnel-through-iap --command 'sudo systemctl restart typesafe'
+```
+
+Publish your fingerprint (`ssh-keygen -lf`) so users can check what they should be trusting.
+
+#### Verifying a deployment
+
+Beyond connecting once, three checks are worth doing because each has a distinct failure mode:
+
+1. **A two-player race**, two terminals against the external IP. Exercises the shared store, the
+   event pump and the synchronised countdown across genuinely separate connections — none of
+   which a single session touches.
+2. **Stop and start the VM**, then reconnect. The IP must be unchanged (static address) and the
+   fingerprint must be unchanged (persistent disk). No `known_hosts` warning is the pass mark,
+   and it also confirms `systemctl enable` survived the reboot.
+3. **Prove the firewall restricts by source**, rather than assuming. From an allowed address the
+   port should open; from anywhere else — the VM itself is a convenient second source — it
+   should be refused.
+
+#### Cost
+
+`e2-micro` in a free-tier region with a 20 GB standard disk sits inside the always-free
+allowance, and a static IP is free while attached to a running instance. Two things to watch: a
+reserved address is billed when **not** attached, so release it if you delete the VM, and free
+tier covers one such instance per month across your whole billing account. Confirm current terms
+against Google's pricing rather than taking them from here.
+
+To tear the whole thing down, delete the project — that removes the VM, address, firewall rules
+and secret in one go.
+
 ### Containers
 
 Not verified in this repository — the systemd path above is the one that has actually been

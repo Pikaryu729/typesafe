@@ -39,6 +39,9 @@ make test     # go test ./... -race
 make lint     # gofmt check + go vet
 ```
 
+CI runs the same targets on every pull request, plus `govulncheck` and a cross-compile; see
+[Continuous integration and deployment](#continuous-integration-and-deployment).
+
 ## Deployment
 
 typesafe deploys as a **single static binary** with no database, no config file and no runtime
@@ -250,6 +253,10 @@ never the one systemd runs. The host key is untouched, so returning users see no
 
 To roll back, put the previous binary back and restart; there is no schema or state to migrate.
 
+On the Google Cloud path this is automated — push a `v*` tag and GitHub Actions does it, keeping
+the outgoing binary for the rollback. See
+[Continuous integration and deployment](#continuous-integration-and-deployment).
+
 ### Logs and monitoring
 
 Logs go to stdout/stderr and therefore to the journal. Each connection logs on open and close
@@ -372,6 +379,67 @@ against Google's pricing rather than taking them from here.
 
 To tear the whole thing down, delete the project — that removes the VM, address, firewall rules
 and secret in one go.
+
+### Continuous integration and deployment
+
+Two workflows under `.github/workflows/`.
+
+**`ci.yml`** runs on every push to `main` and every pull request: `gofmt`/`go vet`, `go mod
+tidy` with a diff check, the test suite with `-race` and a coverage summary on the job page, a
+cross-compile of `linux/amd64` and `linux/arm64` with the same flags a deploy uses, and
+`govulncheck`.
+
+**`deploy.yml`** ships to the GCE VM. It runs on a `v*` tag or a manual dispatch — **not** on
+merges to `main`, because a deploy restarts the service and that drops every connected session
+and running race. It calls `ci.yml` first (a tag can point at a commit CI never ran on), then
+builds, uploads through the IAP tunnel, and pipes `deploy/remote-install.sh` over SSH — the same
+script `deploy/gcp.sh` uses, so the manual and automated paths install one systemd unit rather
+than two that drift.
+
+#### Setting it up
+
+`deploy/gcp.sh` provisions the infrastructure; this only grants GitHub access to it.
+
+```sh
+PROJECT=your-project-id ./deploy/github-oidc.sh
+```
+
+It creates a `typesafe-deployer` service account, sets up Workload Identity Federation, turns on
+OS Login for the instance, and prints three `gh variable set` commands to run. Then:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+**No key is stored in GitHub.** The workflow presents its OIDC token, and the pool trades it for
+short-lived Google credentials. Which is the point of the attribute condition the script sets —
+the provider accepts tokens only from this repository. Without it, any repository on GitHub
+could authenticate as your deployer.
+
+The service account gets three roles and no more: find the instance (`compute.viewer`), reach
+port 22 through the tunnel (`iap.tunnelResourceAccessor`), and log in as a sudoer to install and
+restart (`compute.osAdminLogin`). It cannot create or destroy anything.
+
+Enabling OS Login changes how *you* reach the box too — your Google identity now grants the
+login instead of a key in project metadata. `gcloud compute ssh` keeps working unchanged.
+
+The `production` environment in the workflow is a hook: add required reviewers to it in repo
+settings and every deploy waits for an approval.
+
+#### What a deploy checks, and what it can't
+
+`remote-install.sh` fails the job if `systemd-analyze verify` rejects the unit, if the service
+is not active after the restart, or if nothing is listening on the port two seconds later. It
+copies the outgoing binary to `/usr/local/bin/typesafe.prev` first, and the job summary prints
+the one-line rollback command.
+
+It cannot check the port from outside: the firewall only admits `SOURCE_RANGE`, and a GitHub
+runner's address is not in it. That is why the listen check runs on the VM. Connecting once
+yourself after a release is still worth it.
+
+If the VM was rebuilt, restore the host key from Secret Manager (above) **before** deploying,
+otherwise the new binary comes up with a fresh identity and every returning user hits the
+`known_hosts` warning.
 
 ### Containers
 

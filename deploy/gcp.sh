@@ -13,6 +13,8 @@
 
 set -euo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 PROJECT="${PROJECT:?set PROJECT to the target GCP project id}"
 BILLING="${BILLING:-}"                 # only needed the first time
 REGION="${REGION:-us-east1}"
@@ -94,62 +96,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 
 say "Upload and install"
 g compute scp /tmp/typesafe-deploy "$INSTANCE:/tmp/typesafe" --zone "$ZONE" --tunnel-through-iap >/dev/null
-g compute ssh "$INSTANCE" --zone "$ZONE" --tunnel-through-iap --command "PORT=$PORT bash -s" <<'REMOTE'
-set -euo pipefail
-id typesafe >/dev/null 2>&1 || sudo useradd --system --no-create-home --shell /usr/sbin/nologin typesafe
-sudo install -m 755 /tmp/typesafe /usr/local/bin/typesafe
-
-sudo tee /etc/systemd/system/typesafe.service >/dev/null <<UNIT
-[Unit]
-Description=typesafe SSH typing server
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=exec
-User=typesafe
-Group=typesafe
-ExecStart=/usr/local/bin/typesafe -host 0.0.0.0 -port ${PORT:-2222} -host-key /var/lib/typesafe/host_ed25519
-StateDirectory=typesafe
-StateDirectoryMode=0700
-Restart=on-failure
-RestartSec=2s
-KillSignal=SIGTERM
-TimeoutStopSec=20s
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
-ProtectProc=invisible
-RestrictAddressFamilies=AF_INET AF_INET6
-RestrictNamespaces=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-SystemCallArchitectures=native
-SystemCallFilter=@system-service
-CapabilityBoundingSet=
-AmbientCapabilities=
-UMask=0077
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-sudo systemd-analyze verify /etc/systemd/system/typesafe.service
-sudo systemctl daemon-reload
-sudo systemctl enable typesafe >/dev/null
-sudo systemctl restart typesafe
-sleep 2
-sudo systemctl is-active typesafe
-REMOTE
+g compute ssh "$INSTANCE" --zone "$ZONE" --tunnel-through-iap --command "PORT=$PORT bash -s" < "$HERE/remote-install.sh"
 
 say "Back up the host key"
 # Without this, rebuilding the VM hands every returning user a changed host

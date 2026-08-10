@@ -36,6 +36,20 @@ Run a single package or test: `go test ./internal/lobby`, `go test ./internal/lo
 session goroutine; the race detector is what catches mistakes there, and several tests exist
 specifically to give it something to find.
 
+## CI/CD
+
+`.github/workflows/ci.yml` on every push and PR: `make lint`, a `go mod tidy` diff check,
+`-race` tests with coverage, a linux amd64/arm64 cross-compile, `govulncheck`. It is also
+`workflow_call`-able.
+
+`.github/workflows/deploy.yml` on a `v*` tag or manual dispatch — never on merge, because a
+deploy restarts the service and all state is in memory. It calls `ci.yml` as a gate, then
+deploys to the GCE VM over the IAP tunnel using Workload Identity Federation (no stored key;
+`deploy/github-oidc.sh` does the one-time setup).
+
+**The systemd unit lives in `deploy/remote-install.sh`, in one copy.** Both `deploy/gcp.sh` and
+the deploy workflow pipe that script over SSH. Change the unit there, never inline in a caller.
+
 ## Stack
 
 The v1 line of the Charm libraries, under `github.com/charmbracelet/*`:

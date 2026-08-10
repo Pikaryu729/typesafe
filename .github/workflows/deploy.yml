@@ -1,0 +1,132 @@
+name: Deploy
+
+# A deploy restarts the service, which drops every connected session and any
+# race in flight (all state is in memory). So this is deliberate: a v* tag, or
+# a button. Never a merge.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Two deploys at once would race over the same binary and unit file.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  # The tag gets the full test suite. A tag can be pushed to a commit CI never
+  # ran on, so this is not redundant with the push-to-main run.
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    # Add required reviewers to this environment in repo settings to gate
+    # production behind an approval.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write # mint the OIDC token Workload Identity Federation trades in
+    env:
+      PROJECT: ${{ vars.GCP_PROJECT }}
+      INSTANCE: ${{ vars.GCP_INSTANCE || 'typesafe' }}
+      PORT: ${{ vars.TYPESAFE_PORT || '2222' }}
+    steps:
+      - name: Check configuration
+        run: |
+          missing=()
+          [ -n "${{ vars.GCP_PROJECT }}" ] || missing+=(GCP_PROJECT)
+          [ -n "${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}" ] || missing+=(GCP_WORKLOAD_IDENTITY_PROVIDER)
+          [ -n "${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}" ] || missing+=(GCP_DEPLOY_SERVICE_ACCOUNT)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "Missing repository variables: ${missing[*]}" >&2
+            echo "Run deploy/github-oidc.sh once; it prints the values to set." >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build -trimpath -ldflags="-s -w" -o typesafe ./cmd/server
+          file typesafe
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      # The instance may have been recreated in a different zone (e2-micro
+      # capacity moves around), so ask rather than hardcode.
+      - name: Find the instance
+        run: |
+          zone=$(gcloud compute instances list --project "$PROJECT" \
+            --filter="name=$INSTANCE" --format='value(zone)' | head -1)
+          [ -n "$zone" ] || { echo "no instance named $INSTANCE in $PROJECT" >&2; exit 1; }
+          echo "ZONE=$zone" >> "$GITHUB_ENV"
+          echo "instance $INSTANCE in $zone"
+
+      # Port 22 is reachable only through IAP, and the runner's OS Login key
+      # takes a moment to propagate after it is first imported, so retry.
+      - name: Upload binary
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if gcloud compute scp typesafe "$INSTANCE:/tmp/typesafe" \
+                 --project "$PROJECT" --zone "$ZONE" --tunnel-through-iap \
+                 --strict-host-key-checking=no --quiet; then
+              exit 0
+            fi
+            echo "attempt $attempt failed; waiting for OS Login to propagate"
+            sleep 10
+          done
+          exit 1
+
+      # Same script deploy/gcp.sh pipes over SSH: one systemd unit, one place
+      # to change it. It keeps the previous binary at /usr/local/bin/typesafe.prev
+      # and fails if nothing is listening on the port afterwards.
+      - name: Install and restart
+        run: |
+          gcloud compute ssh "$INSTANCE" \
+            --project "$PROJECT" --zone "$ZONE" --tunnel-through-iap \
+            --strict-host-key-checking=no --quiet \
+            --command "PORT=$PORT bash -s" < deploy/remote-install.sh
+
+      - name: Report
+        if: always()
+        run: |
+          ip=$(gcloud compute instances describe "$INSTANCE" --project "$PROJECT" --zone "$ZONE" \
+            --format='value(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null || true)
+          {
+            echo "### Deploy ${{ job.status }}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| ref | \`${{ github.ref_name }}\` |"
+            echo "| commit | \`${{ github.sha }}\` |"
+            echo "| instance | \`$INSTANCE\` (\`$ZONE\`) |"
+            echo "| address | \`ssh -p $PORT yourname@$ip\` |"
+            echo
+            echo "Roll back with:"
+            echo '```sh'
+            echo "gcloud compute ssh $INSTANCE --project $PROJECT --zone $ZONE --tunnel-through-iap \\"
+            echo "  --command 'sudo install -m 755 /usr/local/bin/typesafe.prev /usr/local/bin/typesafe && sudo systemctl restart typesafe'"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

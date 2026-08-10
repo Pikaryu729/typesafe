@@ -16,7 +16,8 @@ Then, from another terminal:
 ssh -p 2222 yourname@localhost
 ```
 
-Any public key is accepted; the username you connect with becomes your display name.
+Any public key is accepted. There is no signup and no password: the key you connected with *is*
+your account, and the username you type becomes your display name the first time it is seen.
 
 ## What you can do
 
@@ -28,7 +29,34 @@ up, and race everyone else on the same passage. You see opponents' progress bars
 time. Everyone is timed from the same instant, so hesitating at the start costs you. The host
 can call a rematch on a fresh passage.
 
+**Profile** — personal bests, lifetime totals, a sparkline of recent speed and a list of your
+last runs. Both practice and races are recorded.
+
+**Link a device** — a second machine has a different SSH key, so it starts out as a different
+typist. Press `c` on the machine you are known on, type the code on the new one, and the two
+accounts merge, history included.
+
 Keys are shown at the bottom of every screen. `ctrl+c` disconnects from anywhere.
+
+## Accounts and history
+
+Everything above works without a database. Passing `-dsn` (or setting `TYPESAFE_DSN`) to a
+PostgreSQL connection string turns on accounts, run history and the profile screen:
+
+```sh
+go run ./cmd/server -dsn 'postgres://typesafe:typesafe@localhost:5432/typesafe?sslmode=disable'
+```
+
+The schema is created and migrated on startup; there is nothing to run by hand.
+
+**Without a DSN the server still works.** Practice and racing behave exactly as they always did,
+sessions are anonymous, and the account-dependent menu items are shown greyed out rather than
+hidden, so the reason is visible. The database is never on the typing path: writes are queued
+and dropped rather than allowed to block a keystroke, and reads happen off the update loop. A
+database that falls over mid-race costs you the record of that race and nothing else.
+
+A DSN that is set but unreachable *at startup* is a hard failure, deliberately — otherwise a
+typo yields a server that passes every health check while quietly recording nothing.
 
 ## Development
 
@@ -39,14 +67,25 @@ make test     # go test ./... -race
 make lint     # gofmt check + go vet
 ```
 
+The default test run needs no database. The Postgres repository has its own tests behind a build
+tag, which CI runs against a service container:
+
+```sh
+TYPESAFE_TEST_DSN='postgres://...' go test -tags integration ./internal/store/...
+```
+
 CI runs the same targets on every pull request, plus `govulncheck` and a cross-compile; see
 [Continuous integration and deployment](#continuous-integration-and-deployment).
 
 ## Deployment
 
-typesafe deploys as a **single static binary** with no database, no config file and no runtime
-dependencies. The only state on disk is the SSH host key. Everything else — lobbies, races,
-stats — lives in memory and is gone on restart.
+typesafe deploys as a **single static binary** with no config file and no runtime dependencies.
+The only state on the machine itself is the SSH host key; lobbies and in-flight races live in
+memory and are gone on restart.
+
+A database is optional. Without one you get the deployment described below and no accounts;
+with one you additionally get history, and the details are under
+[Accounts on Cloud SQL](#accounts-on-cloud-sql).
 
 The walkthrough below targets a Linux host with systemd. It assumes you are deploying to
 `example.com` and running the service as a dedicated unprivileged user.
@@ -251,7 +290,10 @@ ssh root@example.com '
 Replacing the file before restarting keeps the swap atomic, so a partially copied binary is
 never the one systemd runs. The host key is untouched, so returning users see no warning.
 
-To roll back, put the previous binary back and restart; there is no schema or state to migrate.
+To roll back, put the previous binary back and restart. Migrations only ever run forward, so an
+older binary against a newer schema is the case to think about before rolling back across a
+release that added one — the columns it does not know about are simply unused, which is fine for
+additive changes and not for anything else.
 
 On the Google Cloud path this is automated — push a `v*` tag and GitHub Actions does it, keeping
 the outgoing binary for the rollback. See
@@ -279,14 +321,18 @@ handles a lot of typists.
 
 Known and deliberate for v1. Worth understanding before putting this somewhere public.
 
-- **All state is in memory.** Restarting drops every session, lobby and running race. There is
-  nothing to back up except the host key.
+- **Live state is in memory.** Restarting drops every session, lobby and running race. Finished
+  runs are in the database and survive; a race interrupted mid-passage is simply gone.
 - **A single process cannot be scaled horizontally.** Lobbies live in one process's memory, so
   two instances behind a load balancer would not share them — players would be unable to see
-  each other depending on which they landed on. Run exactly one.
-- **Any public key is accepted.** This is the design: there are no accounts, and the username
-  you connect with is just a display name. It also means anyone who can reach the port can use
-  the server, and that two people can connect under the same name.
+  each other depending on which they landed on. Run exactly one. The database does not change
+  this: it holds history, not live lobbies.
+- **Any public key is accepted.** This is the design: the key identifies you, it does not
+  authorise you. Anyone who can reach the port can use the server and will get an account by
+  doing so, and two people can still connect under the same display name.
+- **A link code hands over an account.** It is short-lived and single-use, but anyone who reads
+  one before it is redeemed gets the account it belongs to. It is closer to a password than to a
+  lobby code, and the screen says so.
 - **No idle timeout.** A session left open holds its connection indefinitely. `wish` supports
   `WithIdleTimeout`, but the server does not currently set one.
 - **No rate limiting or per-IP connection cap.** `wish` ships a rate-limiter middleware that is
@@ -379,6 +425,43 @@ against Google's pricing rather than taking them from here.
 
 To tear the whole thing down, delete the project — that removes the VM, address, firewall rules
 and secret in one go.
+
+### Accounts on Cloud SQL
+
+Optional, and separate from everything above: the server runs perfectly well without it. One
+script, after `deploy/gcp.sh` has built the VM:
+
+```sh
+PROJECT=your-project-id ./deploy/sql.sh
+```
+
+It creates a shared-core Postgres instance with no public IP, a database and application user,
+puts the generated password straight into Secret Manager, creates a `typesafe-vm` service
+account that may reach Cloud SQL and read that one secret, attaches it to the VM, and writes
+`/etc/typesafe/sql.conf`. Then deploy as usual — the proxy and the wiring install themselves.
+
+Four things worth knowing.
+
+**Attaching the service account stops the VM.** The instance was created `--no-service-account`,
+and `set-service-account` refuses to run against a live one, so there is no way to avoid a
+restart. The script warns before doing it. Nothing about the server's identity changes: the host
+key is on the boot disk and the address is reserved, so returning users see no `known_hosts`
+warning.
+
+**Configuration lives on the VM, not in the deploy.** `sql.conf` is what `remote-install.sh`
+reads to decide whether to install the proxy. That means a deploy — from your laptop or from a
+tag — never carries database configuration and cannot accidentally remove it.
+
+**The password is never on disk in the repository or the image.** A oneshot unit fetches it from
+Secret Manager into `/run/typesafe/db.env` at boot, readable only by root and the service
+account. It has to be a separate unit rather than an `ExecStartPre`, because systemd reads
+`EnvironmentFile` before a service's own `ExecStartPre` runs.
+
+**Cost.** A `db-f1-micro` instance is outside the always-free tier and is the first thing in this
+project that costs money every month — roughly $10 depending on region and storage, which the
+$300 trial credit covers for its 90 days. Confirm against Google's pricing rather than this
+paragraph. To stop paying: `gcloud sql instances delete typesafe-db`, remove
+`/etc/typesafe/sql.conf`, and redeploy; the server drops back to anonymous mode.
 
 ### Continuous integration and deployment
 

@@ -25,8 +25,11 @@ import (
 	"github.com/charmbracelet/wish/logging"
 	"github.com/charmbracelet/wish/recover"
 	"github.com/muesli/termenv"
+	gossh "golang.org/x/crypto/ssh"
 
 	"github.com/Pikaryu729/typesafe/internal/lobby"
+	"github.com/Pikaryu729/typesafe/internal/store"
+	"github.com/Pikaryu729/typesafe/internal/store/pg"
 	"github.com/Pikaryu729/typesafe/internal/ui"
 )
 
@@ -34,38 +37,65 @@ import (
 // exiting anyway.
 const shutdownTimeout = 10 * time.Second
 
+// startupTimeout bounds connecting to the database and running migrations.
+const startupTimeout = 30 * time.Second
+
+// resolveTimeout bounds the account lookup a connection waits on. A session
+// that cannot resolve in this long proceeds anonymously rather than hanging:
+// the point of the app is typing, not the database.
+const resolveTimeout = 3 * time.Second
+
+// writeQueue is how many finished runs may be waiting to be stored before new
+// ones are dropped. Runs arrive at human speed, so this is only ever reached
+// if the database has stopped answering, in which case dropping is the point.
+const writeQueue = 256
+
 func main() {
 	var (
 		host        = flag.String("host", "0.0.0.0", "address to bind the SSH server to")
 		port        = flag.String("port", "2222", "port to listen on")
 		hostKeyPath = flag.String("host-key", ".ssh/typesafe_ed25519", "path to the SSH host key, generated if absent")
+		dsn         = flag.String("dsn", os.Getenv("TYPESAFE_DSN"), "PostgreSQL connection string; empty runs with no accounts or history")
 	)
 	flag.Parse()
 
-	if err := run(*host, *port, *hostKeyPath); err != nil {
+	if err := run(*host, *port, *hostKeyPath, *dsn); err != nil {
 		log.Error("server failed", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(host, port, hostKeyPath string) error {
+func run(host, port, hostKeyPath, dsn string) error {
 	addr := net.JoinHostPort(host, port)
 
-	// One store for the whole process: this is the state every session shares.
-	store := lobby.NewStore()
+	repo, closeRepo, err := openRepository(dsn)
+	if err != nil {
+		return err
+	}
+	defer closeRepo()
+
+	// One set of shared state for the whole process. The lobby store is the
+	// live state every session mutates; the repository is what outlives them.
+	d := &deps{lobbies: lobby.NewStore(), repo: repo}
 
 	srv, err := wish.NewServer(
 		wish.WithAddress(addr),
 		wish.WithHostKeyPath(hostKeyPath),
-		// Accept any key: identity is just the username the client chose.
-		wish.WithPublicKeyAuth(func(ssh.Context, ssh.PublicKey) bool { return true }),
+		wish.WithPublicKeyAuth(func(ctx ssh.Context, key ssh.PublicKey) bool {
+			// Still accept every key: there are no accounts to be shut out of,
+			// and the key is how you are recognised rather than how you are
+			// admitted. Keeping the fingerprint is what turns "some connection"
+			// into "this typist, again".
+			ctx.SetValue(fingerprintKey{}, gossh.FingerprintSHA256(key))
+			return true
+		}),
 		wish.WithMiddleware(
 			// Middleware runs in reverse order of this list, so logging sees
 			// the session first and the TUI is innermost. cleanupMiddleware is
 			// listed first, which makes it the innermost of all: the Bubble
 			// Tea middleware calls it only after the program has stopped.
 			cleanupMiddleware(),
-			recover.Middleware(teaMiddleware(store)),
+			recover.Middleware(teaMiddleware(d)),
 			activeterm.Middleware(), // the TUI is unusable without a PTY
 			logging.Middleware(),
 		),
@@ -102,6 +132,53 @@ func run(host, port, hostKeyPath string) error {
 	return nil
 }
 
+// deps is the process-wide state a session needs handed to it.
+type deps struct {
+	lobbies *lobby.Store
+	// repo is nil when the server runs without a database.
+	repo store.Repository
+}
+
+// openRepository connects to dsn, migrates it, and wraps it so writes never
+// block a session. An empty dsn is not an error: it is how the server runs
+// with no accounts and no history, exactly as it did before there was a
+// database.
+//
+// A dsn that is set but unreachable *is* an error, deliberately. Starting
+// anyway would give a server that looks healthy to the deploy's checks while
+// silently recording nothing, and a typo in the DSN would be discovered days
+// later by a user wondering where their history went. systemd restarts us, so
+// a database that is merely slow to come up resolves itself.
+func openRepository(dsn string) (store.Repository, func(), error) {
+	if dsn == "" {
+		log.Warn("no -dsn given: accounts and history are disabled")
+		return nil, func() {}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), startupTimeout)
+	defer cancel()
+
+	repo, err := pg.New(ctx, dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("connect to database: %w", err)
+	}
+	if err := repo.Migrate(ctx); err != nil {
+		repo.Close()
+		return nil, nil, fmt.Errorf("migrate database: %w", err)
+	}
+	log.Info("database ready")
+
+	async := store.NewAsync(repo, writeQueue, func(err error) {
+		log.Error("could not store run", "error", err)
+	})
+	return async, func() {
+		// Drain queued runs before the pool goes away, so a clean shutdown
+		// does not throw away the race that just finished.
+		_ = async.Close()
+		repo.Close()
+	}, nil
+}
+
 // teaMiddleware builds the Bubble Tea middleware.
 //
 // MiddlewareWithProgramHandler is used rather than the simpler Middleware
@@ -111,24 +188,38 @@ func run(host, port, hostKeyPath string) error {
 //
 // The colour profile argument is a floor applied by wish's MakeRenderer, which
 // newRenderer replaces; it is passed for correctness should that change.
-func teaMiddleware(store *lobby.Store) wish.Middleware {
-	handler := func(sess ssh.Session) *tea.Program { return newProgram(sess, store) }
+func teaMiddleware(d *deps) wish.Middleware {
+	handler := func(sess ssh.Session) *tea.Program { return newProgram(sess, d) }
 	return bm.MiddlewareWithProgramHandler(handler, termenv.ANSI256)
 }
 
-func newProgram(sess ssh.Session, store *lobby.Store) *tea.Program {
+func newProgram(sess ssh.Session, d *deps) *tea.Program {
 	pty, _, ok := sess.Pty()
 	if !ok {
 		return nil // activeterm rejects these, but do not assume it ran
 	}
 
+	fingerprint, _ := sess.Context().Value(fingerprintKey{}).(string)
+	user := resolveUser(sess, d.repo, fingerprint)
+
+	// The account's name wins over whatever was typed at the ssh prompt, so a
+	// returning typist is shown to others under the name their history is
+	// under rather than a new one each connection.
+	name := sess.User()
+	if user.DisplayName != "" {
+		name = user.DisplayName
+	}
+
 	m := ui.NewRoot(ui.Config{
-		Username: sess.User(),
+		Username: name,
 		// Identity is per session, not per name: any key is accepted, so two
 		// people can connect as the same user and one person can hold several
 		// sessions at once.
-		PlayerID: lobby.NewPlayerID(),
-		Store:    store,
+		PlayerID:    lobby.NewPlayerID(),
+		Store:       d.lobbies,
+		User:        user,
+		Fingerprint: fingerprint,
+		Repo:        d.repo,
 		// The renderer is scoped to this client's terminal rather than the
 		// server's, which matters as soon as two people are connected.
 		Renderer: newRenderer(sess),
@@ -149,8 +240,37 @@ func newProgram(sess ssh.Session, store *lobby.Store) *tea.Program {
 	return p
 }
 
+// resolveUser finds the account behind this session's key, creating one on a
+// first connection.
+//
+// Every failure here is survivable and none of them may refuse the connection:
+// an anonymous session types and races exactly as before, it just has no
+// history. That is the whole reason the return value is a zero User rather
+// than an error.
+func resolveUser(sess ssh.Session, repo store.Repository, fingerprint string) store.User {
+	if repo == nil || fingerprint == "" {
+		return store.User{}
+	}
+
+	ctx, cancel := context.WithTimeout(sess.Context(), resolveTimeout)
+	defer cancel()
+
+	user, err := repo.ResolveUser(ctx, fingerprint, sess.User())
+	if err != nil {
+		log.Error("could not resolve account; continuing anonymously",
+			"user", sess.User(), "error", err)
+		return store.User{}
+	}
+	return user
+}
+
 // sessionContextKey retrieves a session's ui.Context from its SSH context.
 type sessionContextKey struct{}
+
+// fingerprintKey retrieves the SHA256 fingerprint of the public key a session
+// authenticated with, stored during the auth callback because that is the only
+// place the key is offered to us.
+type fingerprintKey struct{}
 
 // cleanupMiddleware releases a session's shared state once its program stops.
 //

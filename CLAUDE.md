@@ -72,11 +72,13 @@ cmd/server/          entrypoint: flags, host key, middleware chain, shutdown, se
 internal/words/      embedded word list, seeded passage generation   (pure)
 internal/typing/     keystroke-level engine: WPM, accuracy, progress (pure)
 internal/lobby/      server-shared state: registry, lobbies, pub/sub (pure, concurrent)
+internal/store/      accounts and finished runs: interface, memory, async wrapper (pure)
+internal/store/pg/   the PostgreSQL implementation and its migrations
 internal/ui/         Bubble Tea models: router plus one per screen
 ```
 
-The three packages below `ui/` have no Bubble Tea or terminal dependency and are tested without
-a PTY. Keep it that way — it is what makes the concurrency and scoring logic testable.
+Every package outside `ui/` has no Bubble Tea or terminal dependency and is tested without a
+PTY. Keep it that way — it is what makes the concurrency and scoring logic testable.
 
 ### The two state tiers
 
@@ -167,9 +169,41 @@ so a client dropping in between does not strand an empty lobby.
 
 ## Persistence
 
-v1 is in-memory only: lobbies, races and stats live in process memory and reset on restart. No
-database. Shared state sits behind `lobby.Store`, so persistence (e.g. SQLite for historical
-stats) can be added without changing how screens interact with it.
+**Live state is in memory; history is in Postgres.** Lobbies, races and the state of an
+in-flight attempt still live in process memory and reset on restart — `lobby.Store` is
+unchanged. What survives is accounts and finished runs, in `internal/store`.
+
+- `internal/store` — `Repository`, the types, `Memory` (used by every test) and `Async`. Pure,
+  no Bubble Tea.
+- `internal/store/pg` — pgx implementation, hand-written SQL, migrations embedded and applied at
+  startup under `pg_advisory_lock`. No ORM, no migration library.
+
+`-dsn` (or `TYPESAFE_DSN`) turns it on. **Empty is a supported mode**, not a broken one: the app
+runs exactly as it did before there was a database, anonymously. A DSN that is set but
+unreachable at startup is a hard failure instead, so a typo does not produce a server that looks
+healthy while recording nothing.
+
+Three rules hold this together:
+
+1. **The database is never on the typing path.** Writes go through `store.Async`, which is a
+   non-blocking send onto a buffered channel — a full queue drops the run, exactly as a lobby
+   broadcast drops an event, and for the same reason. Reads happen inside a `tea.Cmd`, off the
+   update loop.
+2. **Every use of `Context.Repo` must tolerate nil,** which is what `Context.tracking()` is for.
+   An anonymous session types and races normally; it just has no history.
+3. **`internal/lobby` knows nothing about persistence.** A race is recorded by each session
+   writing its own result on `RaceEnded`, not by the lobby writing everyone's.
+
+### Identity
+
+The SSH public key fingerprint is the account. `cmd/server/main.go` computes it in the auth
+callback — still accepting every key — and stashes it on the `ssh.Context`; the session resolves
+it to an account, creating one on a first connection. Several keys can point at one account
+through a link code, which merges the two accounts (runs and keys move, the emptied one is
+deleted).
+
+`store.Summarize` is the definition of what the profile figures mean. `Memory` calls it; the SQL
+recomputes it; the integration tests assert the two agree. Change one and you must change both.
 
 ## Conventions
 

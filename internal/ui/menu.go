@@ -19,9 +19,7 @@ var menuItems = []menuItem{
 	{
 		title: "Practice",
 		desc:  "Type a passage at your own pace",
-		act: func(c *Context) tea.Cmd {
-			return navigate(newStub(c, "Practice", "Solo practice is not wired up yet."))
-		},
+		act:   func(c *Context) tea.Cmd { return navigate(NewPractice(c)) },
 	},
 	{
 		title: "Race",

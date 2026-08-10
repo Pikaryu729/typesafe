@@ -35,3 +35,37 @@ func (c *Context) contentWidth() int {
 	}
 	return minContentWidth
 }
+
+// Bounds on how much of a passage is shown at once. Below the minimum there is
+// no room to see what is coming; above the maximum the eye has too far to
+// travel between lines.
+const (
+	minPassageLines = 2
+	maxPassageLines = 6
+	// passageChrome is the rows a typing screen spends on everything that is
+	// not the passage: header, stats, help and the blank lines between them.
+	passageChrome = 10
+)
+
+// passageLines is how many lines of the passage to show, given the terminal's
+// height.
+func (c *Context) passageLines() int {
+	n := c.Height - passageChrome
+	if n < minPassageLines {
+		return minPassageLines
+	}
+	if n > maxPassageLines {
+		return maxPassageLines
+	}
+	return n
+}
+
+// stat renders one figure with its label, e.g. "82 wpm".
+func (c *Context) stat(value, label string) string {
+	return c.Styles.StatValue.Render(value) + " " + c.Styles.StatLabel.Render(label)
+}
+
+// stats joins stat pairs into a single row.
+func (c *Context) statRow(pairs ...string) string {
+	return strings.Join(pairs, "   ")
+}

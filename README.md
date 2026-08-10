@@ -38,3 +38,271 @@ make run      # run the server
 make test     # go test ./... -race
 make lint     # gofmt check + go vet
 ```
+
+## Deployment
+
+typesafe deploys as a **single static binary** with no database, no config file and no runtime
+dependencies. The only state on disk is the SSH host key. Everything else — lobbies, races,
+stats — lives in memory and is gone on restart.
+
+The walkthrough below targets a Linux host with systemd. It assumes you are deploying to
+`example.com` and running the service as a dedicated unprivileged user.
+
+### 1. Build
+
+Build on any machine with Go 1.26+; the result is a static binary you can copy to a server that
+has no Go toolchain:
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o typesafe ./cmd/server
+```
+
+`CGO_ENABLED=0` is what makes it static, so it runs on any glibc/musl distribution regardless of
+version. Use `GOARCH=arm64` for ARM servers. The binary is about 6 MB.
+
+Confirm before shipping it:
+
+```sh
+file typesafe    # ...ELF 64-bit LSB executable, statically linked, stripped
+```
+
+### 2. Install on the server
+
+```sh
+# Copy the binary up
+scp typesafe root@example.com:/usr/local/bin/typesafe
+ssh root@example.com 'chmod 755 /usr/local/bin/typesafe'
+
+# A dedicated user with no shell and no home
+ssh root@example.com 'useradd --system --no-create-home --shell /usr/sbin/nologin typesafe'
+```
+
+There is no directory to create by hand: the systemd unit below uses `StateDirectory=`, which
+makes `/var/lib/typesafe` on start, owned by the service user, mode `0700`.
+
+### 3. The host key
+
+**This is the part worth getting right.** The server generates an ed25519 host key on first
+start if one is not already there, and reuses it afterwards. Its path must be **absolute and on
+persistent storage**.
+
+The default is `.ssh/typesafe_ed25519`, *relative to the working directory* — fine for local
+development, wrong for a service. If the key ends up somewhere ephemeral it is regenerated on
+every restart, and every returning user is met with `WARNING: REMOTE HOST IDENTIFICATION HAS
+CHANGED` and refused a connection until they edit `known_hosts`. Point `-host-key` at
+`/var/lib/typesafe/host_ed25519`, as the unit below does.
+
+Missing parent directories are created for you, with the key written `0600`.
+
+To keep an existing identity — reinstalling a host, or moving between machines — copy both
+`host_ed25519` and `host_ed25519.pub` across before first start, preserving ownership and mode.
+Record the fingerprint so you can tell users what to expect:
+
+```sh
+ssh-keygen -lf /var/lib/typesafe/host_ed25519.pub
+```
+
+### 4. The systemd unit
+
+Write `/etc/systemd/system/typesafe.service`:
+
+```ini
+[Unit]
+Description=typesafe SSH typing server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=typesafe
+Group=typesafe
+ExecStart=/usr/local/bin/typesafe -host 0.0.0.0 -port 2222 -host-key /var/lib/typesafe/host_ed25519
+
+# Creates /var/lib/typesafe, owned by the service user
+StateDirectory=typesafe
+StateDirectoryMode=0700
+
+Restart=on-failure
+RestartSec=2s
+# The server drains live sessions for up to 10s on SIGTERM; leave it room
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+
+# Hardening. The service needs exactly one thing from the host: a TCP socket.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Check it before enabling — this catches typos that would otherwise surface as a failed start:
+
+```sh
+systemd-analyze verify /etc/systemd/system/typesafe.service
+```
+
+Then:
+
+```sh
+systemctl daemon-reload
+systemctl enable --now typesafe
+```
+
+### 5. Verify
+
+```sh
+systemctl status typesafe          # active (running)
+journalctl -u typesafe -f          # "INFO typesafe listening addr=0.0.0.0:2222"
+```
+
+From your own machine, connect for real:
+
+```sh
+ssh -p 2222 yourname@example.com
+```
+
+You should land on the main menu. Sanity-check the whole path: run a practice attempt, then open
+a second terminal, join the first player's lobby by code, and race. If the second player never
+appears in the first player's lobby, the two sessions are not sharing state — check you are not
+somehow running two processes.
+
+### 6. Firewall
+
+Open the port you chose:
+
+```sh
+ufw allow 2222/tcp                              # ufw
+firewall-cmd --permanent --add-port=2222/tcp    # firewalld
+firewall-cmd --reload
+```
+
+If the host is behind a cloud security group, open it there too.
+
+### Running on port 22
+
+Port 2222 avoids a fight with the system's own `sshd`, which almost always owns 22. If you want
+users to type plain `ssh you@example.com`, you have three options, in rough order of sanity:
+
+1. **Move your admin sshd to another port** (say 2022), then give typesafe port 22. Do this
+   carefully and keep an existing session open while you test the new one — locking yourself out
+   of a remote box is easy here.
+2. **Bind each to a different address**, if the host has more than one IP: point typesafe at one
+   with `-host 203.0.113.10` and restrict `sshd` to the other with `ListenAddress`.
+3. **Leave it on 2222** and tell people the port.
+
+Binding below 1024 as an unprivileged user needs one capability. Rather than editing the unit,
+add a drop-in with `systemctl edit typesafe`, which writes
+`/etc/systemd/system/typesafe.service.d/override.conf`:
+
+```
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/typesafe -host 0.0.0.0 -port 22 -host-key /var/lib/typesafe/host_ed25519
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+```
+
+Two things there are easy to get wrong. The empty `ExecStart=` is required: without it systemd
+appends a second command rather than replacing the first, and refuses to start a `Type=exec`
+service with two. And the capability lines must *override* rather than add, because the unit
+above deliberately sets both to empty.
+
+Then `systemctl daemon-reload && systemctl restart typesafe`.
+
+### Upgrading
+
+A restart disconnects everyone and destroys every lobby and in-flight race — see the limits
+below. Deploy when nobody is mid-race, or accept it.
+
+```sh
+scp typesafe root@example.com:/usr/local/bin/typesafe.new
+ssh root@example.com '
+  install -m 755 /usr/local/bin/typesafe.new /usr/local/bin/typesafe &&
+  rm /usr/local/bin/typesafe.new &&
+  systemctl restart typesafe &&
+  systemctl is-active typesafe'
+```
+
+Replacing the file before restarting keeps the swap atomic, so a partially copied binary is
+never the one systemd runs. The host key is untouched, so returning users see no warning.
+
+To roll back, put the previous binary back and restart; there is no schema or state to migrate.
+
+### Logs and monitoring
+
+Logs go to stdout/stderr and therefore to the journal. Each connection logs on open and close
+with its duration:
+
+```sh
+journalctl -u typesafe -f
+journalctl -u typesafe --since "1 hour ago" | grep connect
+```
+
+There are no metrics endpoints and no health check. `systemctl is-active typesafe` plus a TCP
+check on the port is the whole story; an external monitor can just open a socket.
+
+Sizing, measured on this build: about 6.7 MB resident when idle, and roughly 400 KB per
+connected session (8 concurrent sessions took it to about 10 MB). Resident memory does not
+shrink immediately when users leave — the Go runtime holds freed memory for reuse. A small VPS
+handles a lot of typists.
+
+### Operational limits
+
+Known and deliberate for v1. Worth understanding before putting this somewhere public.
+
+- **All state is in memory.** Restarting drops every session, lobby and running race. There is
+  nothing to back up except the host key.
+- **A single process cannot be scaled horizontally.** Lobbies live in one process's memory, so
+  two instances behind a load balancer would not share them — players would be unable to see
+  each other depending on which they landed on. Run exactly one.
+- **Any public key is accepted.** This is the design: there are no accounts, and the username
+  you connect with is just a display name. It also means anyone who can reach the port can use
+  the server, and that two people can connect under the same name.
+- **No idle timeout.** A session left open holds its connection indefinitely. `wish` supports
+  `WithIdleTimeout`, but the server does not currently set one.
+- **No rate limiting or per-IP connection cap.** `wish` ships a rate-limiter middleware that is
+  not wired up.
+
+The last two matter mainly if you expose this to the open internet. Restricting the port to a
+VPN or a known set of addresses sidesteps both.
+
+### Containers
+
+Not verified in this repository — the systemd path above is the one that has actually been
+tested end to end. If you would rather run it in a container, the binary is static, so the image
+is trivial:
+
+```dockerfile
+FROM scratch
+COPY typesafe /typesafe
+EXPOSE 2222
+ENTRYPOINT ["/typesafe", "-host", "0.0.0.0", "-port", "2222", \
+            "-host-key", "/data/host_ed25519"]
+```
+
+Mount a volume at `/data` so the host key survives the container being recreated — otherwise
+every deploy hands users a new host identity and the `known_hosts` warning that comes with it.
+Make sure the container is stopped with `SIGTERM` and given at least 15s to drain
+(`docker stop --time 15`).

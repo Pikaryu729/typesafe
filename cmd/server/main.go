@@ -25,6 +25,8 @@ import (
 	"github.com/charmbracelet/wish/logging"
 	"github.com/charmbracelet/wish/recover"
 	"github.com/muesli/termenv"
+
+	"github.com/Pikary729/typesafe/internal/ui"
 )
 
 // shutdownTimeout bounds how long we wait for live sessions to drain before
@@ -99,6 +101,9 @@ func run(host, port, hostKeyPath string) error {
 // because it exposes the *tea.Program. Races need that handle: shared lobby
 // state pushes updates into a session with Program.Send, since a Bubble Tea
 // View cannot read shared state directly.
+//
+// The colour profile argument is a floor applied by wish's MakeRenderer, which
+// newRenderer replaces; it is passed for correctness should that change.
 func teaMiddleware() wish.Middleware {
 	return bm.MiddlewareWithProgramHandler(newProgram, termenv.ANSI256)
 }
@@ -109,40 +114,10 @@ func newProgram(sess ssh.Session) *tea.Program {
 		return nil // activeterm rejects these, but do not assume it ran
 	}
 
-	m := placeholderModel{
-		username: sess.User(),
-		width:    pty.Window.Width,
-		height:   pty.Window.Height,
-	}
+	// The renderer is scoped to this client's terminal rather than the
+	// server's, which matters as soon as two people are connected at once.
+	m := ui.NewRoot(sess.User(), newRenderer(sess), pty.Window.Width, pty.Window.Height)
 
 	opts := append(bm.MakeOptions(sess), tea.WithAltScreen())
 	return tea.NewProgram(m, opts...)
-}
-
-// placeholderModel is a stand-in until the real UI router lands. It confirms
-// that the SSH plumbing, PTY sizing and rendering all work end to end.
-type placeholderModel struct {
-	username string
-	width    int
-	height   int
-}
-
-func (m placeholderModel) Init() tea.Cmd { return nil }
-
-func (m placeholderModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width, m.height = msg.Width, msg.Height
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
-			return m, tea.Quit
-		}
-	}
-	return m, nil
-}
-
-func (m placeholderModel) View() string {
-	return fmt.Sprintf("typesafe\n\nhello, %s\nterminal: %dx%d\n\npress q to quit\n",
-		m.username, m.width, m.height)
 }

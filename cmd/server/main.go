@@ -26,6 +26,7 @@ import (
 	"github.com/charmbracelet/wish/recover"
 	"github.com/muesli/termenv"
 
+	"github.com/Pikary729/typesafe/internal/lobby"
 	"github.com/Pikary729/typesafe/internal/ui"
 )
 
@@ -50,6 +51,9 @@ func main() {
 func run(host, port, hostKeyPath string) error {
 	addr := net.JoinHostPort(host, port)
 
+	// One store for the whole process: this is the state every session shares.
+	store := lobby.NewStore()
+
 	srv, err := wish.NewServer(
 		wish.WithAddress(addr),
 		wish.WithHostKeyPath(hostKeyPath),
@@ -58,7 +62,7 @@ func run(host, port, hostKeyPath string) error {
 		wish.WithMiddleware(
 			// Middleware runs in reverse order of this list, so logging sees
 			// the session first and the TUI is innermost.
-			recover.Middleware(teaMiddleware()),
+			recover.Middleware(teaMiddleware(store)),
 			activeterm.Middleware(), // the TUI is unusable without a PTY
 			logging.Middleware(),
 		),
@@ -104,20 +108,37 @@ func run(host, port, hostKeyPath string) error {
 //
 // The colour profile argument is a floor applied by wish's MakeRenderer, which
 // newRenderer replaces; it is passed for correctness should that change.
-func teaMiddleware() wish.Middleware {
-	return bm.MiddlewareWithProgramHandler(newProgram, termenv.ANSI256)
+func teaMiddleware(store *lobby.Store) wish.Middleware {
+	handler := func(sess ssh.Session) *tea.Program { return newProgram(sess, store) }
+	return bm.MiddlewareWithProgramHandler(handler, termenv.ANSI256)
 }
 
-func newProgram(sess ssh.Session) *tea.Program {
+func newProgram(sess ssh.Session, store *lobby.Store) *tea.Program {
 	pty, _, ok := sess.Pty()
 	if !ok {
 		return nil // activeterm rejects these, but do not assume it ran
 	}
 
-	// The renderer is scoped to this client's terminal rather than the
-	// server's, which matters as soon as two people are connected at once.
-	m := ui.NewRoot(sess.User(), newRenderer(sess), pty.Window.Width, pty.Window.Height)
+	m := ui.NewRoot(ui.Config{
+		Username: sess.User(),
+		// Identity is per session, not per name: any key is accepted, so two
+		// people can connect as the same user and one person can hold several
+		// sessions at once.
+		PlayerID: lobby.NewPlayerID(),
+		Store:    store,
+		// The renderer is scoped to this client's terminal rather than the
+		// server's, which matters as soon as two people are connected.
+		Renderer: newRenderer(sess),
+		Width:    pty.Window.Width,
+		Height:   pty.Window.Height,
+	})
 
-	opts := append(bm.MakeOptions(sess), tea.WithAltScreen())
-	return tea.NewProgram(m, opts...)
+	p := tea.NewProgram(m, append(bm.MakeOptions(sess), tea.WithAltScreen())...)
+
+	// Give the session a way to receive lobby events from other goroutines.
+	// Safe unsynchronised because this happens before p.Run, on the same
+	// goroutine that will then run the update loop.
+	m.Context().SetSender(p.Send)
+
+	return p
 }

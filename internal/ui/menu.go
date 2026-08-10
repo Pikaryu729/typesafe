@@ -24,9 +24,7 @@ var menuItems = []menuItem{
 	{
 		title: "Race",
 		desc:  "Create or join a lobby and race other players",
-		act: func(c *Context) tea.Cmd {
-			return navigate(newStub(c, "Race", "Lobbies are not wired up yet."))
-		},
+		act:   func(c *Context) tea.Cmd { return navigate(NewBrowser(c)) },
 	},
 	{
 		title: "Quit",

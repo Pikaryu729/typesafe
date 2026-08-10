@@ -4,7 +4,19 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/Pikary729/typesafe/internal/lobby"
 )
+
+// Config describes one SSH session to the UI.
+type Config struct {
+	Username string
+	PlayerID string
+	Store    *lobby.Store
+	// Renderer must be scoped to this session's terminal, not the server's.
+	Renderer      *lipgloss.Renderer
+	Width, Height int
+}
 
 // Root is the top-level model for one SSH session. It owns the session
 // context, keeps exactly one Screen active, and swaps it on navigateMsg.
@@ -13,17 +25,22 @@ type Root struct {
 	screen Screen
 }
 
-// NewRoot builds the model for a session. renderer must be scoped to that
-// session; width and height are the client's initial terminal size.
-func NewRoot(username string, renderer *lipgloss.Renderer, width, height int) Root {
+// NewRoot builds the model for a session.
+func NewRoot(cfg Config) Root {
 	ctx := &Context{
-		Username: username,
-		Styles:   NewStyles(renderer),
-		Width:    width,
-		Height:   height,
+		Username: cfg.Username,
+		PlayerID: cfg.PlayerID,
+		Store:    cfg.Store,
+		Styles:   NewStyles(cfg.Renderer),
+		Width:    cfg.Width,
+		Height:   cfg.Height,
 	}
 	return Root{ctx: ctx, screen: NewMenu(ctx)}
 }
+
+// Context returns the session context. Callers use it to attach the Bubble Tea
+// program with SetSender once the program exists.
+func (m Root) Context() *Context { return m.ctx }
 
 func (m Root) Init() tea.Cmd { return m.screen.Init() }
 

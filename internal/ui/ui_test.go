@@ -7,6 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/Pikary729/typesafe/internal/lobby"
 )
 
 // testRenderer returns a renderer writing nowhere. Its colour profile degrades
@@ -17,13 +19,24 @@ func testRenderer() *lipgloss.Renderer { return lipgloss.NewRenderer(io.Discard)
 func newTestContext() *Context {
 	return &Context{
 		Username: "tester",
+		PlayerID: "tester-id",
+		Store:    lobby.NewStore(),
 		Styles:   NewStyles(testRenderer()),
 		Width:    80,
 		Height:   24,
 	}
 }
 
-func newTestRoot() Root { return NewRoot("tester", testRenderer(), 80, 24) }
+func newTestRoot() Root {
+	return NewRoot(Config{
+		Username: "tester",
+		PlayerID: "tester-id",
+		Store:    lobby.NewStore(),
+		Renderer: testRenderer(),
+		Width:    80,
+		Height:   24,
+	})
+}
 
 // key builds the KeyMsg a terminal would produce for a named key.
 func key(name string) tea.KeyMsg {

@@ -315,7 +315,7 @@ func TestSubscribeDeliversLobbyEventsToTheProgram(t *testing.T) {
 
 	received := make(chan tea.Msg, 16)
 	host.SetSender(func(msg tea.Msg) { received <- msg })
-	host.subscribe(l)
+	host.enterLobby(l)
 
 	// Another session joins; the host's program should hear about it.
 	l.Join(guest.PlayerID, guest.Username)
@@ -365,5 +365,79 @@ func TestMenuRaceItemOpensBrowser(t *testing.T) {
 
 	if _, ok := cmd().(navigateMsg).to.(Browser); !ok {
 		t.Error("the Race menu item did not open the lobby browser")
+	}
+}
+
+// Disconnect is what stops a dropped client becoming a ghost: a player nobody
+// can remove, in a lobby that therefore never closes.
+func TestDisconnectLeavesTheLobby(t *testing.T) {
+	host, guest := twoContexts()
+	l := host.Store.Create(host.PlayerID, host.Username)
+	host.enterLobby(l)
+	l.Join(guest.PlayerID, guest.Username)
+	guest.enterLobby(l)
+
+	guest.Disconnect()
+
+	if got := len(l.Snapshot().Players); got != 1 {
+		t.Errorf("lobby holds %d players after a disconnect, want 1", got)
+	}
+	if guest.lobby != nil {
+		t.Error("the session still thinks it is in a lobby")
+	}
+}
+
+func TestDisconnectClosesAnAbandonedLobby(t *testing.T) {
+	host, _ := twoContexts()
+	l := host.Store.Create(host.PlayerID, host.Username)
+	host.enterLobby(l)
+
+	host.Disconnect()
+
+	if got := host.Store.Len(); got != 0 {
+		t.Errorf("store holds %d lobbies after the last player dropped, want 0", got)
+	}
+}
+
+func TestDisconnectOutsideALobbyIsSafe(t *testing.T) {
+	newTestContext().Disconnect() // must not panic
+}
+
+func TestDisconnectIsIdempotent(t *testing.T) {
+	host, _ := twoContexts()
+	l := host.Store.Create(host.PlayerID, host.Username)
+	host.enterLobby(l)
+
+	host.Disconnect()
+	host.Disconnect() // a second teardown must not panic or double-leave
+}
+
+// Creating a lobby claims it immediately, so a client dropping between the
+// create and the waiting room does not strand an empty lobby.
+func TestCreatingALobbyClaimsItForCleanup(t *testing.T) {
+	ctx := newTestContext()
+	NewBrowser(ctx).Update(key("c"))
+
+	if ctx.lobby == nil {
+		t.Fatal("creating a lobby did not record it on the session")
+	}
+	ctx.Disconnect()
+	if got := ctx.Store.Len(); got != 0 {
+		t.Errorf("store holds %d lobbies, want the abandoned one closed", got)
+	}
+}
+
+func TestJoiningALobbyClaimsItForCleanup(t *testing.T) {
+	host, guest := twoContexts()
+	l := host.Store.Create(host.PlayerID, host.Username)
+
+	NewBrowser(guest).Update(key("enter"))
+
+	if guest.lobby != l {
+		t.Fatal("joining a lobby did not record it on the session")
+	}
+	guest.Disconnect()
+	if got := len(l.Snapshot().Players); got != 1 {
+		t.Errorf("lobby holds %d players, want the dropped joiner removed", got)
 	}
 }

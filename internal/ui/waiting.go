@@ -31,7 +31,7 @@ func NewWaitingRoom(ctx *Context, l *lobby.Lobby) WaitingRoom {
 func (w WaitingRoom) Init() tea.Cmd {
 	// Start forwarding this lobby's events into the program. The subscription
 	// ends by itself when we leave or the lobby closes.
-	w.ctx.subscribe(w.lobby)
+	w.ctx.enterLobby(w.lobby)
 	return nil
 }
 

@@ -31,9 +31,10 @@ type Context struct {
 	// send delivers a message into this session's Bubble Tea program from
 	// outside its update loop. See SetSender.
 	send func(tea.Msg)
-	// subscribedTo is the lobby currently feeding this session events, so
-	// re-entering a screen does not tear down and rebuild the pump.
-	subscribedTo *lobby.Lobby
+	// lobby is the lobby this session currently belongs to, if any. It backs
+	// both the event pump and the cleanup on disconnect, so it is recorded the
+	// moment the player joins rather than when a screen happens to subscribe.
+	lobby *lobby.Lobby
 }
 
 // SetSender wires the context to its Bubble Tea program, so lobby events can
@@ -54,22 +55,27 @@ func (c *Context) Send(msg tea.Msg) {
 	}
 }
 
-// subscribe starts forwarding a lobby's events into this session's program.
+// enterLobby records that this session is in l and starts forwarding the
+// lobby's events into its program.
 //
 // A Bubble Tea View cannot read shared state directly, so updates have to
-// arrive as messages. The goroutine ends on its own when the channel closes,
-// which the lobby does when the player leaves or the lobby shuts down — so
-// there is nothing to cancel and nothing to leak.
+// arrive as messages. The pump goroutine ends on its own when the channel
+// closes, which the lobby does when the player leaves or the lobby shuts down
+// — so there is nothing to cancel and nothing to leak.
 //
-// Subscribing again to the same lobby is a no-op. Screens within a lobby hand
-// off to each other freely (waiting room, race, results, and back on a
-// rematch), and resubscribing each time would drop events in the gap between
-// closing one channel and opening the next.
-func (c *Context) subscribe(l *lobby.Lobby) {
-	if c.subscribedTo == l {
+// Entering the same lobby again is a no-op. Screens within a lobby hand off to
+// each other freely (waiting room, race, results, and back on a rematch), and
+// resubscribing each time would drop events in the gap between closing one
+// channel and opening the next.
+//
+// Callers should invoke this immediately on joining, not when a screen first
+// wants events: it is also what tells the disconnect cleanup which lobby to
+// remove the player from.
+func (c *Context) enterLobby(l *lobby.Lobby) {
+	if c.lobby == l {
 		return
 	}
-	c.subscribedTo = l
+	c.lobby = l
 
 	ch := l.Subscribe(c.PlayerID)
 	go func() {
@@ -83,8 +89,22 @@ func (c *Context) subscribe(l *lobby.Lobby) {
 // subscription channel, which is what ends the goroutine.
 func (c *Context) leaveLobby(l *lobby.Lobby) {
 	l.Leave(c.PlayerID)
-	if c.subscribedTo == l {
-		c.subscribedTo = nil
+	if c.lobby == l {
+		c.lobby = nil
+	}
+}
+
+// Disconnect releases everything the session was holding. Without it a client
+// that drops — closing the terminal, losing the network, pressing ctrl+c —
+// stays in its lobby forever as a player nobody can remove, and a lobby of
+// nothing but ghosts never closes.
+//
+// It must run on the session's own goroutine once the Bubble Tea program has
+// stopped. That is what makes touching session state here safe rather than a
+// race against the update loop; see cmd/server.
+func (c *Context) Disconnect() {
+	if c.lobby != nil {
+		c.leaveLobby(c.lobby)
 	}
 }
 

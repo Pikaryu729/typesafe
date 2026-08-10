@@ -61,7 +61,10 @@ func run(host, port, hostKeyPath string) error {
 		wish.WithPublicKeyAuth(func(ssh.Context, ssh.PublicKey) bool { return true }),
 		wish.WithMiddleware(
 			// Middleware runs in reverse order of this list, so logging sees
-			// the session first and the TUI is innermost.
+			// the session first and the TUI is innermost. cleanupMiddleware is
+			// listed first, which makes it the innermost of all: the Bubble
+			// Tea middleware calls it only after the program has stopped.
+			cleanupMiddleware(),
 			recover.Middleware(teaMiddleware(store)),
 			activeterm.Middleware(), // the TUI is unusable without a PTY
 			logging.Middleware(),
@@ -140,5 +143,34 @@ func newProgram(sess ssh.Session, store *lobby.Store) *tea.Program {
 	// goroutine that will then run the update loop.
 	m.Context().SetSender(p.Send)
 
+	// Stash the context so cleanupMiddleware can find it once the program ends.
+	sess.Context().SetValue(sessionContextKey{}, m.Context())
+
 	return p
+}
+
+// sessionContextKey retrieves a session's ui.Context from its SSH context.
+type sessionContextKey struct{}
+
+// cleanupMiddleware releases a session's shared state once its program stops.
+//
+// Without it, a client that disconnects stays in its lobby as a player nobody
+// can remove: the lobby never empties, so it never closes, and the browser
+// fills with ghost lobbies holding people who left.
+//
+// Placement matters. This is the innermost middleware, so the Bubble Tea
+// middleware calls it as its next handler — which happens only after
+// program.Run returns, on the session's own goroutine. Cleaning up there
+// rather than from a goroutine watching the session context means it cannot
+// race the update loop for the state it is tearing down. It runs after a
+// panic too, because the recover middleware still calls its next handler.
+func cleanupMiddleware() wish.Middleware {
+	return func(next ssh.Handler) ssh.Handler {
+		return func(sess ssh.Session) {
+			if c, ok := sess.Context().Value(sessionContextKey{}).(*ui.Context); ok {
+				c.Disconnect()
+			}
+			next(sess)
+		}
+	}
 }

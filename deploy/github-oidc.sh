@@ -81,7 +81,12 @@ say "OS Login on $INSTANCE"
 # How a service account gets an SSH login at all: without OS Login there is no
 # POSIX account to map it to. This also changes how *you* ssh to the box — your
 # Google identity now grants the login, which is the better arrangement anyway.
-ZONE=$(g compute instances list --filter="name=$INSTANCE" --format='value(zone)' | head -1)
+# Guarded: pipefail would otherwise abort the script on a lookup failure, after
+# the pool and bindings were created but before the variables are printed.
+ZONE=""
+if ZONE_FOUND=$(g compute instances list --filter="name=$INSTANCE" --format='value(zone)' 2>/dev/null | head -1); then
+  ZONE="$ZONE_FOUND"
+fi
 if [ -z "$ZONE" ]; then
   echo "WARNING: no instance named $INSTANCE; run deploy/gcp.sh, then re-run this" >&2
 else

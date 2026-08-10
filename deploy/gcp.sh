@@ -95,7 +95,10 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
   go build -trimpath -ldflags="-s -w" -o /tmp/typesafe-deploy ./cmd/server
 
 say "Upload and install"
-g compute scp /tmp/typesafe-deploy "$INSTANCE:/tmp/typesafe" --zone "$ZONE" --tunnel-through-iap >/dev/null
+# Upload into the login user's home, not /tmp: CI deploys log in as a different
+# user and /tmp is sticky, so a shared path would leave each unable to replace
+# the other's file.
+g compute scp /tmp/typesafe-deploy "$INSTANCE:typesafe.new" --zone "$ZONE" --tunnel-through-iap >/dev/null
 g compute ssh "$INSTANCE" --zone "$ZONE" --tunnel-through-iap --command "PORT=$PORT bash -s" < "$HERE/remote-install.sh"
 
 say "Back up the host key"

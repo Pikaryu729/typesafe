@@ -108,7 +108,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # Pinned: @latest would run code nobody reviewed, and a behaviour change
+      # in a fresh release would turn releases red with no code change. Bump it
+      # deliberately.
       - name: govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           govulncheck ./...

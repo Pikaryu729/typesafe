@@ -57,11 +57,19 @@ type Styles struct {
 	Bad       lipgloss.Style
 }
 
+// Padding applied by Styles.App around every screen. Screens that need to know
+// how much room they actually have should use Context.contentWidth rather than
+// subtracting these themselves.
+const (
+	appPaddingX = 2
+	appPaddingY = 1
+)
+
 // NewStyles builds the style set against a session-scoped renderer, which
-// callers get from bubbletea.MakeRenderer(sshSession).
+// callers get from newRenderer(sshSession) in cmd/server.
 func NewStyles(r *lipgloss.Renderer) Styles {
 	return Styles{
-		App:      r.NewStyle().Padding(1, 2),
+		App:      r.NewStyle().Padding(appPaddingY, appPaddingX),
 		Title:    r.NewStyle().Foreground(palette.accent).Bold(true),
 		Subtitle: r.NewStyle().Foreground(palette.muted),
 		Help:     r.NewStyle().Foreground(palette.dim),

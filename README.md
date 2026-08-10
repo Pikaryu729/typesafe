@@ -435,12 +435,18 @@ script, after `deploy/gcp.sh` has built the VM:
 PROJECT=your-project-id ./deploy/sql.sh
 ```
 
-It creates a shared-core Postgres instance with no public IP, a database and application user,
-puts the generated password straight into Secret Manager, creates a `typesafe-vm` service
-account that may reach Cloud SQL and read that one secret, attaches it to the VM, and writes
-`/etc/typesafe/sql.conf`. Then deploy as usual — the proxy and the wiring install themselves.
+It creates a shared-core Postgres instance, a database and application user, puts the generated
+password straight into Secret Manager, creates a `typesafe-vm` service account that may reach
+Cloud SQL and read that one secret, attaches it to the VM, and writes `/etc/typesafe/sql.conf`.
+Then deploy as usual — the proxy and the wiring install themselves.
 
-Four things worth knowing.
+Five things worth knowing.
+
+**The instance has a public address, and that is fine.** Cloud SQL refuses an instance with no
+connectivity at all, and private IP would mean VPC peering for the sake of one VM. What keeps it
+shut is the pair the script sets instead: no authorized networks, so no address on the internet
+may connect, and `TRUSTED_CLIENT_CERTIFICATE_REQUIRED`, which only the Auth Proxy satisfies. The
+proxy is authorised by IAM rather than by where it connects from.
 
 **Attaching the service account stops the VM.** The instance was created `--no-service-account`,
 and `set-service-account` refuses to run against a live one, so there is no way to avoid a

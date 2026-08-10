@@ -41,6 +41,23 @@ say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 g() { gcloud --project "$PROJECT" "$@"; }
 has() { "$@" >/dev/null 2>&1; }
 
+# retry rides out eventual consistency. A freshly created service account is
+# not immediately visible to other services, so granting it a role seconds
+# later fails with "does not exist" — which is a timing problem, not a real
+# one, and should not abandon a half-finished provisioning run.
+retry() {
+  local n=1
+  until "$@"; do
+    if [ "$n" -ge 6 ]; then
+      echo "giving up after $n attempts: $*" >&2
+      return 1
+    fi
+    echo "  retrying in 10s (attempt $n)"
+    n=$((n + 1))
+    sleep 10
+  done
+}
+
 say "APIs"
 g services enable sqladmin.googleapis.com secretmanager.googleapis.com
 
@@ -48,8 +65,12 @@ say "Cloud SQL instance: $SQL_INSTANCE ($TIER, $DB_VERSION)"
 if has g sql instances describe "$SQL_INSTANCE"; then
   echo "already exists"
 else
-  # No authorized networks and no public client access: the only way in is the
-  # Cloud SQL Auth Proxy, which authenticates with IAM rather than an address.
+  # An address is unavoidable — Cloud SQL refuses an instance with no
+  # connectivity at all, and private IP would mean setting up VPC peering for
+  # one VM. What actually keeps it shut is the pair below: no authorized
+  # networks, so no address on the internet may connect, and a client
+  # certificate required, which only the Auth Proxy has. The proxy is
+  # authorised by IAM rather than by where it is connecting from.
   g sql instances create "$SQL_INSTANCE" \
     --database-version "$DB_VERSION" \
     --tier "$TIER" \
@@ -59,7 +80,9 @@ else
     --storage-auto-increase \
     --availability-type zonal \
     --backup --backup-start-time "$BACKUP_START" \
-    --no-assign-ip >/dev/null
+    --ssl-mode TRUSTED_CLIENT_CERTIFICATE_REQUIRED >/dev/null
+  # Authorized networks are deliberately not set: none is the default, and none
+  # is what we want.
   echo "created"
 fi
 
@@ -99,9 +122,9 @@ has g iam service-accounts describe "$SA" ||
 
 # Narrow on purpose: connect to Cloud SQL, and read one secret. Not project
 # viewer, not editor.
-g projects add-iam-policy-binding "$PROJECT" \
+retry g projects add-iam-policy-binding "$PROJECT" \
   --member "serviceAccount:$SA" --role roles/cloudsql.client --condition=None >/dev/null
-g secrets add-iam-policy-binding "$DB_SECRET" \
+retry g secrets add-iam-policy-binding "$DB_SECRET" \
   --member "serviceAccount:$SA" --role roles/secretmanager.secretAccessor >/dev/null
 echo "roles/cloudsql.client + secretAccessor on $DB_SECRET"
 
@@ -132,14 +155,26 @@ fi
 say "Tell the VM about the database"
 # remote-install.sh reads this on every deploy and installs the proxy from it,
 # so deploys do not have to carry database configuration.
-g compute ssh "$INSTANCE" --zone "$ZONE" --tunnel-through-iap --quiet \
-  --command "sudo install -d -m 0755 /etc/typesafe && sudo tee /etc/typesafe/sql.conf >/dev/null" <<CONF
+#
+# Written to a temp file first because this may have to be retried: the VM was
+# very likely just restarted above, and sshd takes a while to start accepting
+# connections after a boot.
+CONF_TMP=$(mktemp)
+trap 'rm -f "$CONF_TMP"' EXIT
+cat >"$CONF_TMP" <<CONF
 # Written by deploy/sql.sh. Read by deploy/remote-install.sh.
 SQL_CONNECTION_NAME=$CONNECTION_NAME
 DB_SECRET=$DB_SECRET
 DB_USER=$DB_USER
 DB_NAME=$DB_NAME
 CONF
+
+write_conf() {
+  g compute ssh "$INSTANCE" --zone "$ZONE" --tunnel-through-iap --quiet \
+    --command "sudo install -d -m 0755 /etc/typesafe && sudo tee /etc/typesafe/sql.conf >/dev/null" \
+    <"$CONF_TMP" >/dev/null 2>&1
+}
+retry write_conf
 echo "wrote /etc/typesafe/sql.conf"
 
 say "Done"

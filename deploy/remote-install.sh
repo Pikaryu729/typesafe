@@ -108,14 +108,18 @@ set -euo pipefail
 
 meta() { curl -fsS -H 'Metadata-Flavor: Google' "http://metadata.google.internal/computeMetadata/v1/$1"; }
 
-TOKEN=$(meta 'instance/service-accounts/default/token' |
-  grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+# Pull one string field out of a JSON body. Tolerant of whitespace because the
+# two endpoints below do not agree on it: the metadata server returns compact
+# JSON, Secret Manager returns it pretty-printed.
+field() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"; }
+
+TOKEN=$(meta 'instance/service-accounts/default/token' | field access_token)
 [ -n "$TOKEN" ] || { echo "no access token from the metadata server" >&2; exit 1; }
 
 PROJECT_ID=$(meta 'project/project-id')
 PASSWORD=$(curl -fsS -H "Authorization: Bearer $TOKEN" \
   "https://secretmanager.googleapis.com/v1/projects/$PROJECT_ID/secrets/${DB_SECRET}/versions/latest:access" |
-  grep -o '"data":"[^"]*"' | cut -d'"' -f4 | base64 -d)
+  field data | base64 -d)
 [ -n "$PASSWORD" ] || { echo "empty password from Secret Manager" >&2; exit 1; }
 
 umask 077

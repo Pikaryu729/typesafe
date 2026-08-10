@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Pikary729/typesafe/internal/typing"
+	"github.com/Pikaryu729/typesafe/internal/typing"
 )
 
 // ansi matches escape sequences so tests can assert on visible text. The

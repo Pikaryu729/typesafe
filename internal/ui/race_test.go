@@ -7,8 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/Pikary729/typesafe/internal/lobby"
-	"github.com/Pikary729/typesafe/internal/words"
+	"github.com/Pikaryu729/typesafe/internal/lobby"
+	"github.com/Pikaryu729/typesafe/internal/words"
 )
 
 // racingLobby returns a lobby already in the racing phase, plus the start

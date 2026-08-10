@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/Pikary729/typesafe/internal/lobby"
+	"github.com/Pikaryu729/typesafe/internal/lobby"
 )
 
 // twoContexts returns two sessions sharing one store, which is what a race

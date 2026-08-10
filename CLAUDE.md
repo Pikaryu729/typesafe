@@ -12,7 +12,7 @@ SSH and get a terminal UI where they can:
 It's a single Go server process: one SSH server that accepts connections and attaches a Bubble
 Tea program to each session.
 
-Module path: `github.com/Pikary729/typesafe`
+Module path: `github.com/Pikaryu729/typesafe`
 
 ## Commands
 

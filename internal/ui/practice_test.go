@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/Pikary729/typesafe/internal/typing"
+	"github.com/Pikaryu729/typesafe/internal/typing"
 )
 
 // practiceOver returns a Practice screen for a known passage, bypassing the

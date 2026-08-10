@@ -1,4 +1,4 @@
-module github.com/Pikary729/typesafe
+module github.com/Pikaryu729/typesafe
 
 go 1.26.5
 

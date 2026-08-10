@@ -26,8 +26,8 @@ import (
 	"github.com/charmbracelet/wish/recover"
 	"github.com/muesli/termenv"
 
-	"github.com/Pikary729/typesafe/internal/lobby"
-	"github.com/Pikary729/typesafe/internal/ui"
+	"github.com/Pikaryu729/typesafe/internal/lobby"
+	"github.com/Pikaryu729/typesafe/internal/ui"
 )
 
 // shutdownTimeout bounds how long we wait for live sessions to drain before

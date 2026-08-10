@@ -7,8 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/Pikary729/typesafe/internal/typing"
-	"github.com/Pikary729/typesafe/internal/words"
+	"github.com/Pikaryu729/typesafe/internal/typing"
+	"github.com/Pikaryu729/typesafe/internal/words"
 )
 
 const (

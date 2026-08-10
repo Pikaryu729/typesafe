@@ -5,7 +5,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/Pikary729/typesafe/internal/typing"
+	"github.com/Pikaryu729/typesafe/internal/typing"
 )
 
 // Rendering of the passage being typed, with per-character feedback. Shared by

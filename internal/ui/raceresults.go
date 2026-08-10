@@ -6,7 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/Pikary729/typesafe/internal/lobby"
+	"github.com/Pikaryu729/typesafe/internal/lobby"
 )
 
 // RaceResults shows the final standings and offers a rematch.

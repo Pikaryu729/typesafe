@@ -8,7 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/Pikary729/typesafe/internal/lobby"
+	"github.com/Pikaryu729/typesafe/internal/lobby"
 )
 
 // testRenderer returns a renderer writing nowhere. Its colour profile degrades

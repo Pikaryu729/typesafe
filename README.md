@@ -429,13 +429,21 @@ settings and every deploy waits for an approval.
 #### What a deploy checks, and what it can't
 
 `remote-install.sh` fails the job if `systemd-analyze verify` rejects the unit, if the service
-is not active after the restart, or if nothing is listening on the port two seconds later. It
-copies the outgoing binary to `/usr/local/bin/typesafe.prev` first, and the job summary prints
-the one-line rollback command.
+is not active after the restart, or if nothing is listening on the port a few seconds later.
 
-It cannot check the port from outside: the firewall only admits `SOURCE_RANGE`, and a GitHub
-runner's address is not in it. That is why the listen check runs on the VM. Connecting once
-yourself after a release is still worth it.
+The outgoing binary is set aside as `/var/backups/typesafe.pending` and only promoted to
+`/var/backups/typesafe.prev` once those checks pass. That ordering is the point: a failed deploy
+leaves the last version *known to have come up* as the rollback target, rather than overwriting
+it with the broken build it just replaced. The job summary prints the one-line rollback command.
+
+The port comes from the `allow-typesafe` firewall rule unless `TYPESAFE_PORT` says otherwise,
+and the job fails if the two disagree. Trusting a default here would rewrite the unit onto a
+port the firewall does not admit — and the listen check, probing that same wrong port, would
+pass while every user was locked out.
+
+The deploy cannot check the port from outside: the firewall only admits `SOURCE_RANGE`, and a
+GitHub runner's address is not in it. That is why the listen check runs on the VM. Connecting
+once yourself after a release is still worth it.
 
 If the VM was rebuilt, restore the host key from Secret Manager (above) **before** deploying,
 otherwise the new binary comes up with a fresh identity and every returning user hits the

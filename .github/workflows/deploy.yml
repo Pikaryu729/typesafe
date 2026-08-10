@@ -33,17 +33,22 @@ jobs:
     permissions:
       contents: read
       id-token: write # mint the OIDC token Workload Identity Federation trades in
+    # Configuration reaches the shell as environment variables, never spliced
+    # into a run: body — a value with a quote or a $(...) in it would otherwise
+    # execute on a runner holding id-token: write.
     env:
       PROJECT: ${{ vars.GCP_PROJECT }}
       INSTANCE: ${{ vars.GCP_INSTANCE || 'typesafe' }}
-      PORT: ${{ vars.TYPESAFE_PORT || '2222' }}
     steps:
       - name: Check configuration
+        env:
+          WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          DEPLOY_SA: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
         run: |
           missing=()
-          [ -n "${{ vars.GCP_PROJECT }}" ] || missing+=(GCP_PROJECT)
-          [ -n "${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}" ] || missing+=(GCP_WORKLOAD_IDENTITY_PROVIDER)
-          [ -n "${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}" ] || missing+=(GCP_DEPLOY_SERVICE_ACCOUNT)
+          [ -n "$PROJECT" ] || missing+=(GCP_PROJECT)
+          [ -n "$WIF_PROVIDER" ] || missing+=(GCP_WORKLOAD_IDENTITY_PROVIDER)
+          [ -n "$DEPLOY_SA" ] || missing+=(GCP_DEPLOY_SERVICE_ACCOUNT)
           if [ ${#missing[@]} -gt 0 ]; then
             echo "Missing repository variables: ${missing[*]}" >&2
             echo "Run deploy/github-oidc.sh once; it prints the values to set." >&2
@@ -84,12 +89,32 @@ jobs:
           echo "ZONE=$zone" >> "$GITHUB_ENV"
           echo "instance $INSTANCE in $zone"
 
+      # The unit's -port is rewritten from this, so getting it wrong rewrites
+      # the server onto a port the firewall does not admit — and the listen
+      # check on the VM would pass while every user is locked out. The firewall
+      # rule is the authority on which port is actually reachable.
+      - name: Resolve the port
+        env:
+          WANT: ${{ vars.TYPESAFE_PORT }}
+        run: |
+          firewall=$(gcloud compute firewall-rules describe allow-typesafe --project "$PROJECT" \
+            --format='value(allowed[0].ports[0])' 2>/dev/null || true)
+          port="${WANT:-${firewall:-2222}}"
+          case "$port" in ''|*[!0-9]*) echo "port '$port' is not a number" >&2; exit 1 ;; esac
+          if [ -n "$firewall" ] && [ "$firewall" != "$port" ]; then
+            echo "TYPESAFE_PORT is $port but the allow-typesafe rule admits tcp:$firewall." >&2
+            echo "Deploying would move the server to a port nothing can reach." >&2
+            exit 1
+          fi
+          echo "PORT=$port" >> "$GITHUB_ENV"
+          echo "port $port (firewall: ${firewall:-no allow-typesafe rule found})"
+
       # Port 22 is reachable only through IAP, and the runner's OS Login key
       # takes a moment to propagate after it is first imported, so retry.
       - name: Upload binary
         run: |
           for attempt in 1 2 3 4 5; do
-            if gcloud compute scp typesafe "$INSTANCE:/tmp/typesafe" \
+            if gcloud compute scp typesafe "$INSTANCE:typesafe.new" \
                  --project "$PROJECT" --zone "$ZONE" --tunnel-through-iap \
                  --strict-host-key-checking=no --quiet; then
               exit 0
@@ -99,9 +124,9 @@ jobs:
           done
           exit 1
 
-      # Same script deploy/gcp.sh pipes over SSH: one systemd unit, one place
-      # to change it. It keeps the previous binary at /usr/local/bin/typesafe.prev
-      # and fails if nothing is listening on the port afterwards.
+      # Same script deploy/gcp.sh pipes over SSH: one systemd unit, one place to
+      # change it. It keeps the previous binary for rollback and fails if
+      # nothing is listening on the port afterwards.
       - name: Install and restart
         run: |
           gcloud compute ssh "$INSTANCE" \
@@ -122,11 +147,11 @@ jobs:
             echo "| ref | \`${{ github.ref_name }}\` |"
             echo "| commit | \`${{ github.sha }}\` |"
             echo "| instance | \`$INSTANCE\` (\`$ZONE\`) |"
-            echo "| address | \`ssh -p $PORT yourname@$ip\` |"
+            echo "| address | \`ssh -p ${PORT:-?} yourname@$ip\` |"
             echo
-            echo "Roll back with:"
+            echo "Roll back to the previous verified build with:"
             echo '```sh'
             echo "gcloud compute ssh $INSTANCE --project $PROJECT --zone $ZONE --tunnel-through-iap \\"
-            echo "  --command 'sudo install -m 755 /usr/local/bin/typesafe.prev /usr/local/bin/typesafe && sudo systemctl restart typesafe'"
+            echo "  --command 'sudo install -m 755 /var/backups/typesafe.prev /usr/local/bin/typesafe && sudo systemctl restart typesafe'"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

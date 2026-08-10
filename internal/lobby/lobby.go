@@ -45,6 +45,12 @@ var (
 	ErrNotFound = errors.New("no such lobby")
 	// ErrClosed is returned when acting on a lobby that has gone away.
 	ErrClosed = errors.New("lobby closed")
+	// ErrNotHost is returned when someone other than the host tries to start.
+	ErrNotHost = errors.New("only the host can start the race")
+	// ErrNotReady is returned when starting before everyone has readied up.
+	ErrNotReady = errors.New("not everyone is ready")
+	// ErrWrongPhase is returned for an action the lobby's phase does not allow.
+	ErrWrongPhase = errors.New("lobby is not in the right phase")
 )
 
 // Phase is where a lobby is in the race cycle.
@@ -91,13 +97,14 @@ type PlayerState struct {
 
 // Result is one player's final standing in a race.
 type Result struct {
-	PlayerID string
-	Name     string
-	Place    int
-	WPM      float64
-	Accuracy float64
-	Elapsed  time.Duration
-	Finished bool // false if the race ended before they got there
+	PlayerID   string
+	Name       string
+	Place      int // 0 if they did not finish
+	WPM        float64
+	Accuracy   float64
+	CharsTyped int
+	Elapsed    time.Duration
+	Finished   bool // false if the race ended before they got there
 }
 
 // Snapshot is a consistent view of a lobby, safe to hand to another goroutine.
@@ -177,6 +184,13 @@ type Lobby struct {
 	startAt time.Time
 	subs    map[string]chan Event
 	closed  bool
+
+	// finishers is the order players crossed the line, so places survive a
+	// player leaving afterwards.
+	finishers []string
+	// abort stops the countdown or race-deadline goroutine early. It is
+	// replaced on each phase change and closed to cancel the previous one.
+	abort chan struct{}
 }
 
 // Code returns the lobby's join code.
@@ -257,6 +271,8 @@ func (l *Lobby) Leave(playerID string) {
 		l.closeLocked()
 	} else {
 		l.broadcastLocked(LobbyUpdated{Snapshot: l.snapshotLocked()})
+		// Someone dropping out can be what ends a countdown or a race.
+		l.reconcilePhaseLocked()
 	}
 	l.mu.Unlock()
 
@@ -339,6 +355,7 @@ func (l *Lobby) closeLocked() {
 		return
 	}
 	l.closed = true
+	l.closeAbortLocked() // stop any countdown or deadline goroutine
 	for id := range l.subs {
 		l.closeSubLocked(id)
 	}
@@ -350,6 +367,11 @@ type Store struct {
 	lobbies map[string]*Lobby
 	words   int
 	rand    *rand.Rand
+
+	now           func() time.Time
+	countdownFrom int
+	countdownTick time.Duration
+	raceTimeout   time.Duration
 }
 
 // Option configures a Store.
@@ -370,15 +392,55 @@ func WithRand(r *rand.Rand) Option {
 	return func(s *Store) { s.rand = r }
 }
 
-// DefaultRaceWords is the passage length for a race.
-const DefaultRaceWords = 25
+// WithClock replaces the time source used for race timing.
+func WithClock(now func() time.Time) Option {
+	return func(s *Store) { s.now = now }
+}
+
+// WithCountdown sets how many ticks a race counts in for, and how long a tick
+// lasts. Tests use a short tick to avoid waiting out a real countdown.
+func WithCountdown(from int, tick time.Duration) Option {
+	return func(s *Store) {
+		if from > 0 {
+			s.countdownFrom = from
+		}
+		if tick > 0 {
+			s.countdownTick = tick
+		}
+	}
+}
+
+// WithRaceTimeout bounds how long a race can run before it is called.
+func WithRaceTimeout(d time.Duration) Option {
+	return func(s *Store) {
+		if d > 0 {
+			s.raceTimeout = d
+		}
+	}
+}
+
+// Defaults for a race.
+const (
+	// DefaultRaceWords is the passage length for a race. Shorter than solo
+	// practice: a race that drags is a race people quit.
+	DefaultRaceWords = 25
+	// DefaultCountdown is how many seconds a race counts in for.
+	DefaultCountdown = 3
+	// DefaultRaceTimeout stops a race that nobody finishes from pinning the
+	// lobby in the racing phase forever.
+	DefaultRaceTimeout = 5 * time.Minute
+)
 
 // NewStore returns an empty registry.
 func NewStore(opts ...Option) *Store {
 	s := &Store{
-		lobbies: make(map[string]*Lobby),
-		words:   DefaultRaceWords,
-		rand:    rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())),
+		lobbies:       make(map[string]*Lobby),
+		words:         DefaultRaceWords,
+		rand:          rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())),
+		now:           time.Now,
+		countdownFrom: DefaultCountdown,
+		countdownTick: time.Second,
+		raceTimeout:   DefaultRaceTimeout,
 	}
 	for _, opt := range opts {
 		opt(s)

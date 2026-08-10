@@ -49,7 +49,7 @@ func (w WaitingRoom) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		return w, nil
 
 	case lobby.RaceStarted:
-		return w, navigate(newStub(w.ctx, "Race", "The race screen is not wired up yet."))
+		return w, navigate(NewRace(w.ctx, w.lobby, msg))
 
 	case tea.KeyMsg:
 		return w.handleKey(msg)
@@ -60,7 +60,7 @@ func (w WaitingRoom) Update(msg tea.Msg) (Screen, tea.Cmd) {
 func (w WaitingRoom) handleKey(msg tea.KeyMsg) (Screen, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
-		w.lobby.Leave(w.ctx.PlayerID)
+		w.ctx.leaveLobby(w.lobby)
 		return w, navigate(NewBrowser(w.ctx))
 
 	case "r", " ":

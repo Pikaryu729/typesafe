@@ -31,6 +31,9 @@ type Context struct {
 	// send delivers a message into this session's Bubble Tea program from
 	// outside its update loop. See SetSender.
 	send func(tea.Msg)
+	// subscribedTo is the lobby currently feeding this session events, so
+	// re-entering a screen does not tear down and rebuild the pump.
+	subscribedTo *lobby.Lobby
 }
 
 // SetSender wires the context to its Bubble Tea program, so lobby events can
@@ -57,13 +60,32 @@ func (c *Context) Send(msg tea.Msg) {
 // arrive as messages. The goroutine ends on its own when the channel closes,
 // which the lobby does when the player leaves or the lobby shuts down — so
 // there is nothing to cancel and nothing to leak.
+//
+// Subscribing again to the same lobby is a no-op. Screens within a lobby hand
+// off to each other freely (waiting room, race, results, and back on a
+// rematch), and resubscribing each time would drop events in the gap between
+// closing one channel and opening the next.
 func (c *Context) subscribe(l *lobby.Lobby) {
+	if c.subscribedTo == l {
+		return
+	}
+	c.subscribedTo = l
+
 	ch := l.Subscribe(c.PlayerID)
 	go func() {
 		for ev := range ch {
 			c.Send(ev)
 		}
 	}()
+}
+
+// leaveLobby removes the player and stops their event pump. Leaving closes the
+// subscription channel, which is what ends the goroutine.
+func (c *Context) leaveLobby(l *lobby.Lobby) {
+	l.Leave(c.PlayerID)
+	if c.subscribedTo == l {
+		c.subscribedTo = nil
+	}
 }
 
 // Screen is one screen of the app.

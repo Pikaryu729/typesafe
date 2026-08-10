@@ -150,18 +150,18 @@ func TestRootStartsOnTheMenu(t *testing.T) {
 
 func TestRootSwitchesScreenOnNavigate(t *testing.T) {
 	root := newTestRoot()
-	target := newStub(root.ctx, "Somewhere", "else")
+	target := NewBrowser(root.ctx)
 
 	updated, _ := root.Update(navigateMsg{to: target})
 
-	if got := updated.(Root).screen; got != Screen(target) {
-		t.Errorf("screen = %#v, want the navigated-to stub", got)
+	if _, ok := updated.(Root).screen.(Browser); !ok {
+		t.Errorf("screen = %T, want the navigated-to Browser", updated.(Root).screen)
 	}
 }
 
 func TestRootCtrlCQuitsFromAnyScreen(t *testing.T) {
 	root := newTestRoot()
-	root.screen = newStub(root.ctx, "Busy", "screen")
+	root.screen = NewPractice(root.ctx) // a screen that consumes ordinary keys
 
 	_, cmd := root.Update(key("ctrl+c"))
 
@@ -196,21 +196,5 @@ func TestRootForwardsKeysToTheActiveScreen(t *testing.T) {
 
 	if got := updated.(Root).screen.(Menu).cursor; got != 1 {
 		t.Errorf("menu cursor = %d after forwarding down, want 1", got)
-	}
-}
-
-func TestStubReturnsToMenu(t *testing.T) {
-	ctx := newTestContext()
-	_, cmd := send(newStub(ctx, "Practice", "not yet"), "esc")
-
-	if cmd == nil {
-		t.Fatal("esc produced no command")
-	}
-	msg, ok := cmd().(navigateMsg)
-	if !ok {
-		t.Fatalf("esc produced %T, want navigateMsg", cmd())
-	}
-	if _, ok := msg.to.(Menu); !ok {
-		t.Errorf("esc navigated to %T, want Menu", msg.to)
 	}
 }

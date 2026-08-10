@@ -54,6 +54,19 @@ func WithClock(now func() time.Time) Option {
 	return func(s *Session) { s.now = now }
 }
 
+// StartedAt begins the attempt at t instead of waiting for the first
+// keystroke.
+//
+// Races need this: every racer is timed from one shared instant, so hesitating
+// at the start costs you rather than being free. Solo practice deliberately
+// does the opposite.
+func StartedAt(t time.Time) Option {
+	return func(s *Session) {
+		s.started = true
+		s.startedAt = t
+	}
+}
+
 // Session is one attempt at typing a passage.
 type Session struct {
 	target []rune

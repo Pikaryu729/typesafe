@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Pikaryu729/typesafe/internal/lobby"
+	"github.com/Pikaryu729/typesafe/internal/store"
 )
 
 // Context is the per-connection state every screen needs. One is created per
@@ -23,6 +24,16 @@ type Context struct {
 	PlayerID string
 	// Store is the server-wide lobby registry, shared by every session.
 	Store *lobby.Store
+	// User is the account behind this session's public key. Its ID is empty
+	// when the session is anonymous, which is what screens check before
+	// offering anything that depends on a stored history.
+	User store.User
+	// Fingerprint is this session's public key, needed to attach it to another
+	// account when a link code is redeemed.
+	Fingerprint string
+	// Repo persists accounts and runs, or is nil when there is no database.
+	// Every use must tolerate nil: practising and racing do not depend on it.
+	Repo store.Repository
 	// Styles is scoped to this session's terminal. See NewStyles.
 	Styles Styles
 	// Width and Height track the client's terminal, updated on resize.

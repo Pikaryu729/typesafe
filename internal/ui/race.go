@@ -39,6 +39,11 @@ type Race struct {
 	// by ProgressUpdated events, which arrive far more often than snapshots.
 	progress map[string]raceProgress
 
+	// seed and wordCount describe the passage, kept so a finished race can be
+	// stored as the numbers that reproduce it.
+	seed      int64
+	wordCount int
+
 	// reported is the position last sent to the lobby, so an idle racer does
 	// not generate traffic.
 	reported int
@@ -57,11 +62,13 @@ type raceProgress struct {
 // first keystroke.
 func NewRace(ctx *Context, l *lobby.Lobby, ev lobby.RaceStarted) Race {
 	return Race{
-		ctx:      ctx,
-		lobby:    l,
-		sess:     typing.New(words.Passage(ev.Seed, ev.Words), typing.StartedAt(ev.StartAt)),
-		snap:     l.Snapshot(),
-		progress: make(map[string]raceProgress),
+		ctx:       ctx,
+		lobby:     l,
+		sess:      typing.New(words.Passage(ev.Seed, ev.Words), typing.StartedAt(ev.StartAt)),
+		snap:      l.Snapshot(),
+		progress:  make(map[string]raceProgress),
+		seed:      ev.Seed,
+		wordCount: ev.Words,
 	}
 }
 
@@ -91,12 +98,33 @@ func (r Race) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		return r, nil
 
 	case lobby.RaceEnded:
+		r.recordOwnResult(msg.Results)
 		return r, navigate(NewRaceResults(r.ctx, r.lobby, msg.Results))
 
 	case tea.KeyMsg:
 		return r.handleKey(msg)
 	}
 	return r, nil
+}
+
+// recordOwnResult stores this player's finish, and only this player's: each
+// session writes its own row, so the lobby package never needs to know that
+// persistence exists.
+//
+// A racer who did not reach the end is not recorded. Their speed over a
+// half-typed passage is not a result they would want counted among their
+// bests.
+func (r Race) recordOwnResult(results []lobby.Result) {
+	for _, res := range results {
+		if res.PlayerID != r.ctx.PlayerID {
+			continue
+		}
+		if !res.Finished {
+			return
+		}
+		r.ctx.record(raceRun(r.seed, r.wordCount, r.lobby.Code(), res, r.sess.Stats()))
+		return
+	}
 }
 
 func (r Race) handleKey(msg tea.KeyMsg) (Screen, tea.Cmd) {

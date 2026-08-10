@@ -31,13 +31,18 @@ func tick() tea.Cmd {
 type Practice struct {
 	ctx  *Context
 	sess *typing.Session
+	// seed is kept so a finished run can be stored as the two numbers that
+	// reproduce its passage, rather than as the text.
+	seed int64
 }
 
 // NewPractice starts an attempt at a freshly generated passage.
 func NewPractice(ctx *Context) Practice {
+	seed := words.NewSeed()
 	return Practice{
 		ctx:  ctx,
-		sess: typing.New(words.Passage(words.NewSeed(), practiceWords)),
+		sess: typing.New(words.Passage(seed, practiceWords)),
+		seed: seed,
 	}
 }
 
@@ -86,7 +91,9 @@ func (p Practice) handleKey(msg tea.KeyMsg) (Screen, tea.Cmd) {
 	}
 
 	if p.sess.Finished() {
-		return p, navigate(newResults(p.ctx, p.sess.Stats()))
+		st := p.sess.Stats()
+		p.ctx.record(practiceRun(p.seed, practiceWords, st))
+		return p, navigate(newResults(p.ctx, st))
 	}
 	return p, nil
 }

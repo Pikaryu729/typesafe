@@ -73,6 +73,39 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # The unit jobs above never touch a database. This one exists because the
+  # Postgres repository and store.Memory are two implementations of one set of
+  # semantics, and only a real database can show they still agree.
+  integration:
+    name: integration (postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: typesafe
+          POSTGRES_PASSWORD: typesafe
+          POSTGRES_DB: typesafe_test
+        ports:
+          - 5432:5432
+        # Without this the job races the container's startup and fails on a
+        # connection refused that looks like a code bug.
+        options: >-
+          --health-cmd "pg_isready -U typesafe"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test
+        env:
+          TYPESAFE_TEST_DSN: postgres://typesafe:typesafe@localhost:5432/typesafe_test?sslmode=disable
+        run: go test -tags integration -race ./internal/store/...
+
   build:
     name: build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest

@@ -6,6 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Pikaryu729/typesafe/internal/lobby"
+	"github.com/Pikaryu729/typesafe/internal/store"
 )
 
 // Config describes one SSH session to the UI.
@@ -13,6 +14,16 @@ type Config struct {
 	Username string
 	PlayerID string
 	Store    *lobby.Store
+	// User is the account this session's public key resolved to. A zero User
+	// means the session is anonymous — no database, or the lookup failed — and
+	// nothing it does will be recorded.
+	User store.User
+	// Fingerprint identifies this session's public key, so it can be attached
+	// to another account from the link screen.
+	Fingerprint string
+	// Repo persists accounts and runs. Nil is valid and means the app runs
+	// exactly as it did before there was a database.
+	Repo store.Repository
 	// Renderer must be scoped to this session's terminal, not the server's.
 	Renderer      *lipgloss.Renderer
 	Width, Height int
@@ -28,12 +39,15 @@ type Root struct {
 // NewRoot builds the model for a session.
 func NewRoot(cfg Config) Root {
 	ctx := &Context{
-		Username: cfg.Username,
-		PlayerID: cfg.PlayerID,
-		Store:    cfg.Store,
-		Styles:   NewStyles(cfg.Renderer),
-		Width:    cfg.Width,
-		Height:   cfg.Height,
+		Username:    cfg.Username,
+		PlayerID:    cfg.PlayerID,
+		Store:       cfg.Store,
+		User:        cfg.User,
+		Fingerprint: cfg.Fingerprint,
+		Repo:        cfg.Repo,
+		Styles:      NewStyles(cfg.Renderer),
+		Width:       cfg.Width,
+		Height:      cfg.Height,
 	}
 	return Root{ctx: ctx, screen: NewMenu(ctx)}
 }

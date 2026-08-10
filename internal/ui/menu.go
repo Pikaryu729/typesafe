@@ -12,6 +12,11 @@ type menuItem struct {
 	desc  string
 	// act runs when the item is chosen. Returning nil leaves the menu up.
 	act func(*Context) tea.Cmd
+	// needsAccount marks an item that only means something when this session's
+	// runs are being recorded. Such items stay on the menu when they are not,
+	// dimmed and labelled: a typist who expected a profile should be told why
+	// there isn't one, not left to conclude the app has none.
+	needsAccount bool
 }
 
 // menuItems is the main menu, in display order.
@@ -27,11 +32,26 @@ var menuItems = []menuItem{
 		act:   func(c *Context) tea.Cmd { return navigate(NewBrowser(c)) },
 	},
 	{
+		title:        "Profile",
+		desc:         "Your bests, totals and recent runs",
+		act:          func(c *Context) tea.Cmd { return navigate(NewProfile(c)) },
+		needsAccount: true,
+	},
+	{
+		title:        "Link a device",
+		desc:         "Use this account from another machine",
+		act:          func(c *Context) tea.Cmd { return navigate(NewLink(c)) },
+		needsAccount: true,
+	},
+	{
 		title: "Quit",
 		desc:  "Disconnect",
 		act:   func(*Context) tea.Cmd { return tea.Quit },
 	},
 }
+
+// enabled reports whether the item can be chosen in this session.
+func (i menuItem) enabled(c *Context) bool { return !i.needsAccount || c.tracking() }
 
 // Menu is the main menu screen.
 type Menu struct {
@@ -62,7 +82,9 @@ func (m Menu) Update(msg tea.Msg) (Screen, tea.Cmd) {
 	case "end", "G":
 		m.cursor = len(menuItems) - 1
 	case "enter", " ":
-		return m, menuItems[m.cursor].act(m.ctx)
+		if item := menuItems[m.cursor]; item.enabled(m.ctx) {
+			return m, item.act(m.ctx)
+		}
 	case "q":
 		return m, tea.Quit
 	}
@@ -77,11 +99,16 @@ func (m Menu) View() string {
 	b.WriteString("\n\n")
 
 	for i, item := range menuItems {
-		if i == m.cursor {
+		switch {
+		case !item.enabled(m.ctx):
+			b.WriteString(s.Item.Render(item.title))
+			b.WriteString("  ")
+			b.WriteString(s.Help.Render("(no account on this server)"))
+		case i == m.cursor:
 			b.WriteString(s.SelectedItem.Render("> " + item.title))
 			b.WriteString("  ")
 			b.WriteString(s.Subtitle.Render(item.desc))
-		} else {
+		default:
 			b.WriteString(s.Item.Render(item.title))
 		}
 		b.WriteString("\n")

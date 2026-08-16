@@ -26,6 +26,15 @@ var (
 	ErrExpiredCode = errors.New("store: link code has expired")
 )
 
+// Errors returned by Buy and Equip. All three are ordinary outcomes the shop
+// reports rather than failures, so they are values a screen can compare
+// against and turn into a sentence.
+var (
+	ErrInsufficientFunds = errors.New("store: not enough bytes")
+	ErrAlreadyOwned      = errors.New("store: already owned")
+	ErrNotOwned          = errors.New("store: not owned")
+)
+
 // Mode is how a run was produced.
 type Mode string
 
@@ -65,8 +74,54 @@ type Run struct {
 	// RaceCode and Place are set for ModeRace only; Place is 1-based.
 	RaceCode string
 	Place    int
+	// Earned is the currency this attempt paid out.
+	//
+	// It rides along in the run's own row rather than in a ledger of its own,
+	// which is what keeps earning off the typing path: the write that records
+	// the run is the write that records its bytes, so the two can never
+	// disagree and there is no second round trip when a race ends.
+	Earned int
 	// CreatedAt is set by the repository when zero.
 	CreatedAt time.Time
+}
+
+// Owned is one cosmetic a typist has bought.
+//
+// The price is what they actually paid, not what the catalogue asks today.
+// Balances are derived from these rows, so a repricing that reached backwards
+// would silently rewrite everyone's balance.
+type Owned struct {
+	ID       string
+	Slot     string
+	Price    int
+	Equipped bool
+	BoughtAt time.Time
+}
+
+// Wallet is everything the shop needs about one typist.
+type Wallet struct {
+	Balance int
+	Owned   []Owned
+}
+
+// EquippedIn returns the cosmetic worn in a slot, or "" for the default.
+func (w Wallet) EquippedIn(slot string) string {
+	for _, o := range w.Owned {
+		if o.Slot == slot && o.Equipped {
+			return o.ID
+		}
+	}
+	return ""
+}
+
+// Owns reports whether this typist has bought a cosmetic.
+func (w Wallet) Owns(id string) bool {
+	for _, o := range w.Owned {
+		if o.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // Summary aggregates a user's history for the profile screen.
@@ -112,6 +167,28 @@ type Repository interface {
 	// Summary aggregates a user's history. A user with no runs yields a zero
 	// Summary rather than an error.
 	Summary(ctx context.Context, userID string) (Summary, error)
+
+	// Wallet returns a user's balance and the cosmetics they own. A user who
+	// has never earned or bought anything yields a zero Wallet, not an error.
+	Wallet(ctx context.Context, userID string) (Wallet, error)
+
+	// Buy records a purchase and returns the wallet it left behind.
+	//
+	// It fails with ErrInsufficientFunds when the balance will not cover the
+	// price and ErrAlreadyOwned when the cosmetic is already theirs, and it
+	// must be atomic against both: two sessions of the same account spending
+	// the same bytes at the same instant is a real case, since one person can
+	// hold several connections.
+	//
+	// The price comes from the caller rather than from a catalogue this
+	// package knows. That is safe here and nowhere else: there is no client to
+	// distrust, because the terminal UI runs in this same server process.
+	Buy(ctx context.Context, userID string, item Owned) (Wallet, error)
+
+	// Equip wears one owned cosmetic in a slot, replacing whatever was there.
+	// An empty cosmeticID takes the slot back to the default. Equipping
+	// something the user does not own fails with ErrNotOwned.
+	Equip(ctx context.Context, userID, slot, cosmeticID string) (Wallet, error)
 
 	// CreateLinkCode issues a code another session can redeem to join userID.
 	CreateLinkCode(ctx context.Context, userID string) (LinkCode, error)
@@ -159,6 +236,28 @@ func Summarize(runs []Run) Summary {
 		s.RecentWPM /= float64(n)
 	}
 	return s
+}
+
+// Balance is the definition of what a balance means: everything a typist has
+// earned, less everything they have bought.
+//
+// It is derived rather than stored, for the same reason Summarize is. A total
+// kept in its own column is a second copy of the truth, and the two drift the
+// first time a write half-succeeds; this cannot, because there is only one
+// copy. Memory calls this directly, the Postgres repository recomputes it in
+// SQL, and the integration tests check the two agree.
+//
+// runs may be in any order — a sum does not care — which is the one way this
+// differs from Summarize.
+func Balance(runs []Run, owned []Owned) int {
+	var b int
+	for _, r := range runs {
+		b += r.Earned
+	}
+	for _, o := range owned {
+		b -= o.Price
+	}
+	return b
 }
 
 // linkCodeAlphabet omits characters that are misread when spoken or typed:

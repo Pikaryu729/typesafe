@@ -6,17 +6,19 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Pikaryu729/typesafe/internal/economy"
 	"github.com/Pikaryu729/typesafe/internal/typing"
 )
 
-// Results reports a finished solo attempt.
+// Results reports a finished solo attempt and what it earned.
 type Results struct {
 	ctx   *Context
 	stats typing.Stats
+	award economy.Award
 }
 
-func newResults(ctx *Context, stats typing.Stats) Results {
-	return Results{ctx: ctx, stats: stats}
+func newResults(ctx *Context, stats typing.Stats, award economy.Award) Results {
+	return Results{ctx: ctx, stats: stats, award: award}
 }
 
 func (r Results) Init() tea.Cmd { return nil }
@@ -60,6 +62,11 @@ func (r Results) View() string {
 		s.StatLabel.Render(formatWPM(st.RawWPM)+" raw wpm"),
 	))
 	b.WriteString("\n\n")
+
+	if earnings := renderAward(r.ctx, r.award); earnings != "" {
+		b.WriteString(earnings)
+		b.WriteString("\n\n")
+	}
 
 	b.WriteString(r.ctx.help("enter/r again", "esc menu"))
 	return b.String()

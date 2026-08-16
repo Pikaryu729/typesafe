@@ -243,3 +243,7 @@ func (failingRepo) Summary(context.Context, string) (store.Summary, error) {
 func (failingRepo) RecentRuns(context.Context, string, int) ([]store.Run, error) {
 	return nil, errDown
 }
+
+func (failingRepo) Wallet(context.Context, string) (store.Wallet, error) {
+	return store.Wallet{}, errDown
+}

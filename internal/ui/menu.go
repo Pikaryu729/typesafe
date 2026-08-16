@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/Pikaryu729/typesafe/internal/economy"
 )
 
 // menuItem is one selectable entry on the main menu.
@@ -35,6 +37,12 @@ var menuItems = []menuItem{
 		title:        "Profile",
 		desc:         "Your bests, totals and recent runs",
 		act:          func(c *Context) tea.Cmd { return navigate(NewProfile(c)) },
+		needsAccount: true,
+	},
+	{
+		title:        "Shop",
+		desc:         "Spend " + economy.Unit + " on cosmetics",
+		act:          func(c *Context) tea.Cmd { return navigate(NewShop(c)) },
 		needsAccount: true,
 	},
 	{
@@ -94,8 +102,16 @@ func (m Menu) Update(msg tea.Msg) (Screen, tea.Cmd) {
 func (m Menu) View() string {
 	s := m.ctx.Styles
 
+	// The balance rides on the header rather than a screen of its own: it is
+	// the number a typist wants to glance at, and it is already in the session
+	// so showing it costs no query.
+	subtitle := "signed in as " + m.ctx.Username
+	if m.ctx.tracking() {
+		subtitle += " · " + formatBalance(m.ctx.Balance)
+	}
+
 	var b strings.Builder
-	b.WriteString(m.ctx.header("signed in as " + m.ctx.Username))
+	b.WriteString(m.ctx.header(subtitle))
 	b.WriteString("\n\n")
 
 	for i, item := range menuItems {

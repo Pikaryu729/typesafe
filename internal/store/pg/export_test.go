@@ -12,9 +12,11 @@ import (
 // nothing outside a test run can reach them.
 
 // Truncate empties every table, so each test starts from nothing. Accounts
-// cascade to keys, runs and codes.
+// cascade to keys, runs, codes and purchases; the tables are still listed so
+// adding one that does not cascade cannot silently leak state between tests.
 func (r *Repo) Truncate(ctx context.Context) error {
-	_, err := r.pool.Exec(ctx, `truncate users, user_keys, runs, link_codes restart identity cascade`)
+	_, err := r.pool.Exec(ctx, `
+		truncate users, user_keys, runs, purchases, link_codes restart identity cascade`)
 	return err
 }
 

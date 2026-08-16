@@ -220,6 +220,7 @@ func newProgram(sess ssh.Session, d *deps) *tea.Program {
 		User:        user,
 		Fingerprint: fingerprint,
 		Repo:        d.repo,
+		Wallet:      loadWallet(sess, d.repo, user),
 		// The renderer is scoped to this client's terminal rather than the
 		// server's, which matters as soon as two people are connected.
 		Renderer: newRenderer(sess),
@@ -262,6 +263,33 @@ func resolveUser(sess ssh.Session, repo store.Repository, fingerprint string) st
 		return store.User{}
 	}
 	return user
+}
+
+// loadWallet reads the bytes and cosmetics this account connected with.
+//
+// It happens once, here, rather than when a screen asks: the balance belongs
+// on the main menu and the equipped cosmetics have to be known before the
+// first lobby is joined, so both would otherwise need a query in the middle of
+// a render. One read at login is cheaper than either.
+//
+// Failure is survivable in the same way resolveUser's is — a zero Wallet is a
+// typist with nothing bought and nothing saved up, which is a state the whole
+// app already handles — so it must not refuse the connection.
+func loadWallet(sess ssh.Session, repo store.Repository, user store.User) store.Wallet {
+	if repo == nil || user.ID == "" {
+		return store.Wallet{}
+	}
+
+	ctx, cancel := context.WithTimeout(sess.Context(), resolveTimeout)
+	defer cancel()
+
+	w, err := repo.Wallet(ctx, user.ID)
+	if err != nil {
+		log.Error("could not load wallet; continuing with none",
+			"user", sess.User(), "error", err)
+		return store.Wallet{}
+	}
+	return w
 }
 
 // sessionContextKey retrieves a session's ui.Context from its SSH context.

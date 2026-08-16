@@ -107,11 +107,13 @@ func (r *Repo) RecordRun(ctx context.Context, run store.Run) error {
 	_, err := r.pool.Exec(ctx, `
 		insert into runs (
 			user_id, mode, seed, word_count, wpm, raw_wpm, accuracy,
-			duration_ms, keystrokes, correct, incorrect, race_code, place, created_at
-		) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+			duration_ms, keystrokes, correct, incorrect, race_code, place,
+			earned, created_at
+		) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
 		run.UserID, string(run.Mode), run.Seed, run.WordCount, run.WPM, run.RawWPM,
 		run.Accuracy, run.Duration.Milliseconds(), run.Keystrokes, run.Correct,
-		run.Incorrect, nullString(run.RaceCode), nullInt(run.Place), run.CreatedAt)
+		run.Incorrect, nullString(run.RaceCode), nullInt(run.Place), run.Earned,
+		run.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("record run: %w", err)
 	}
@@ -123,7 +125,7 @@ func (r *Repo) RecentRuns(ctx context.Context, userID string, limit int) ([]stor
 	rows, err := r.pool.Query(ctx, `
 		select mode, seed, word_count, wpm, raw_wpm, accuracy, duration_ms,
 		       keystrokes, correct, incorrect, coalesce(race_code, ''),
-		       coalesce(place, 0), created_at
+		       coalesce(place, 0), earned, created_at
 		from runs where user_id = $1
 		order by created_at desc, id desc
 		limit $2`, userID, limit)
@@ -141,7 +143,7 @@ func (r *Repo) RecentRuns(ctx context.Context, userID string, limit int) ([]stor
 		)
 		if err := rows.Scan(&mode, &run.Seed, &run.WordCount, &run.WPM, &run.RawWPM,
 			&run.Accuracy, &durationMS, &run.Keystrokes, &run.Correct, &run.Incorrect,
-			&run.RaceCode, &run.Place, &run.CreatedAt); err != nil {
+			&run.RaceCode, &run.Place, &run.Earned, &run.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan run: %w", err)
 		}
 		run.UserID = userID
@@ -190,6 +192,143 @@ func (r *Repo) Summary(ctx context.Context, userID string) (store.Summary, error
 	s.RecentWPM = recentWPM
 	s.TotalTime = time.Duration(totalMS) * time.Millisecond
 	return s, nil
+}
+
+// Wallet recomputes the balance rather than reading one back.
+//
+// The figure must match store.Balance exactly — everything earned less
+// everything bought — and the integration tests compare the two against
+// identical input, the same guard the Summary query has.
+func (r *Repo) Wallet(ctx context.Context, userID string) (store.Wallet, error) {
+	return r.wallet(ctx, r.pool, userID)
+}
+
+// querier is the part of pgx a read needs, so the wallet can be rebuilt either
+// on the pool or inside the transaction that just changed it.
+type querier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+func (r *Repo) wallet(ctx context.Context, q querier, userID string) (store.Wallet, error) {
+	var w store.Wallet
+	err := q.QueryRow(ctx, `
+		select coalesce((select sum(earned) from runs where user_id = $1), 0)
+		     - coalesce((select sum(price) from purchases where user_id = $1), 0)`,
+		userID).Scan(&w.Balance)
+	if err != nil {
+		return store.Wallet{}, fmt.Errorf("balance: %w", err)
+	}
+
+	rows, err := q.Query(ctx, `
+		select cosmetic_id, slot, price, equipped, created_at
+		from purchases where user_id = $1
+		order by created_at, id`, userID)
+	if err != nil {
+		return store.Wallet{}, fmt.Errorf("owned cosmetics: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var o store.Owned
+		if err := rows.Scan(&o.ID, &o.Slot, &o.Price, &o.Equipped, &o.BoughtAt); err != nil {
+			return store.Wallet{}, fmt.Errorf("scan cosmetic: %w", err)
+		}
+		w.Owned = append(w.Owned, o)
+	}
+	return w, rows.Err()
+}
+
+func (r *Repo) Buy(ctx context.Context, userID string, item store.Owned) (store.Wallet, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return store.Wallet{}, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// One person can hold several sessions, so the same account can reach two
+	// purchases at once. Serialise on the account the way ResolveUser
+	// serialises on a fingerprint: without it, both could read a balance that
+	// covers one item and then both spend it.
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, userID); err != nil {
+		return store.Wallet{}, fmt.Errorf("lock account: %w", err)
+	}
+
+	w, err := r.wallet(ctx, tx, userID)
+	if err != nil {
+		return store.Wallet{}, err
+	}
+	if w.Owns(item.ID) {
+		return store.Wallet{}, store.ErrAlreadyOwned
+	}
+	if w.Balance < item.Price {
+		return store.Wallet{}, store.ErrInsufficientFunds
+	}
+
+	if item.BoughtAt.IsZero() {
+		item.BoughtAt = time.Now()
+	}
+	// Never equipped by the act of buying: Equip is the one path that keeps
+	// the one-per-slot rule, and the unique index below would fight it here.
+	_, err = tx.Exec(ctx, `
+		insert into purchases (user_id, cosmetic_id, slot, price, created_at)
+		values ($1, $2, $3, $4, $5)`,
+		userID, item.ID, item.Slot, item.Price, item.BoughtAt)
+	if isUniqueViolation(err) {
+		return store.Wallet{}, store.ErrAlreadyOwned
+	}
+	if err != nil {
+		return store.Wallet{}, fmt.Errorf("buy cosmetic: %w", err)
+	}
+
+	w, err = r.wallet(ctx, tx, userID)
+	if err != nil {
+		return store.Wallet{}, err
+	}
+	return w, tx.Commit(ctx)
+}
+
+func (r *Repo) Equip(ctx context.Context, userID, slot, cosmeticID string) (store.Wallet, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return store.Wallet{}, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Serialised on the account for the same reason Buy is. Two sessions
+	// equipping into one slot at once would otherwise both clear it, both set
+	// it, and the second would fail against the one-per-slot index — a
+	// harmless outcome reported as an incomprehensible error.
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, userID); err != nil {
+		return store.Wallet{}, fmt.Errorf("lock account: %w", err)
+	}
+
+	// Clear the slot before wearing anything, so the partial unique index
+	// never sees two equipped rows even for an instant. An empty cosmeticID
+	// stops here, which is what takes the slot back to the default.
+	if _, err := tx.Exec(ctx, `
+		update purchases set equipped = false
+		where user_id = $1 and slot = $2 and equipped`, userID, slot); err != nil {
+		return store.Wallet{}, fmt.Errorf("clear slot: %w", err)
+	}
+
+	if cosmeticID != "" {
+		tag, err := tx.Exec(ctx, `
+			update purchases set equipped = true
+			where user_id = $1 and slot = $2 and cosmetic_id = $3`, userID, slot, cosmeticID)
+		if err != nil {
+			return store.Wallet{}, fmt.Errorf("equip cosmetic: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return store.Wallet{}, store.ErrNotOwned
+		}
+	}
+
+	w, err := r.wallet(ctx, tx, userID)
+	if err != nil {
+		return store.Wallet{}, err
+	}
+	return w, tx.Commit(ctx)
 }
 
 func (r *Repo) CreateLinkCode(ctx context.Context, userID string) (store.LinkCode, error) {
@@ -261,6 +400,24 @@ func (r *Repo) RedeemLinkCode(ctx context.Context, code, fingerprint string) (st
 		// matters: the rows have to move before the cascade could take them.
 		if _, err := tx.Exec(ctx, `update runs set user_id = $1 where user_id = $2`, targetID, sourceID); err != nil {
 			return store.User{}, fmt.Errorf("move runs: %w", err)
+		}
+		// A cosmetic the target already owns is dropped rather than moved:
+		// owning one twice is not a thing, and since a balance is earned less
+		// bought, dropping the row hands its price back — the duplicate is
+		// refunded, which is the only fair outcome.
+		if _, err := tx.Exec(ctx, `
+			delete from purchases where user_id = $2 and cosmetic_id in (
+				select cosmetic_id from purchases where user_id = $1
+			)`, targetID, sourceID); err != nil {
+			return store.User{}, fmt.Errorf("drop duplicate cosmetics: %w", err)
+		}
+		// Everything that survives arrives unequipped, so two accounts wearing
+		// different colours cannot merge into one wearing both — which the
+		// one-per-slot index would refuse anyway.
+		if _, err := tx.Exec(ctx, `
+			update purchases set user_id = $1, equipped = false where user_id = $2`,
+			targetID, sourceID); err != nil {
+			return store.User{}, fmt.Errorf("move cosmetics: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `update user_keys set user_id = $1 where user_id = $2`, targetID, sourceID); err != nil {
 			return store.User{}, fmt.Errorf("move keys: %w", err)

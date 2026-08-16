@@ -148,13 +148,10 @@ func (w WaitingRoom) renderPlayer(p lobby.PlayerState) string {
 		mark = s.Good.Render("●")
 	}
 
-	name := p.Name
-	if p.ID == w.ctx.PlayerID {
-		name += " (you)"
-	}
+	name := renderName(s, p.Name, p.Flair, p.ID == w.ctx.PlayerID)
 	if p.ID == w.snap.HostID {
-		name += " · host"
+		name += s.StatLabel.Render(" · host")
 	}
 
-	return s.Item.Render(mark + " " + name)
+	return rowIndent + mark + " " + name
 }

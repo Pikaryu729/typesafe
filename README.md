@@ -32,16 +32,59 @@ can call a rematch on a fresh passage.
 **Profile** — personal bests, lifetime totals, a sparkline of recent speed and a list of your
 last runs. Both practice and races are recorded.
 
+**Shop** — spend the bytes you have earned on cosmetics: a colour for your name, a title beside
+it, the glyphs your race bar is drawn with, and a colour scheme for your own passage. The first
+three are what everyone else in the lobby sees.
+
 **Link a device** — a second machine has a different SSH key, so it starts out as a different
 typist. Press `c` on the machine you are known on, type the code on the new one, and the two
 accounts merge, history included.
 
 Keys are shown at the bottom of every screen. `ctrl+c` disconnects from anywhere.
 
+## Bytes
+
+Finishing a passage pays **bytes**, and bytes buy cosmetics. There is one currency, typing is
+its only source, and there is no code path anywhere that exchanges money for it — nothing here
+is gated, nothing expires, and none of it touches how a race is scored or won.
+
+A race pays a small random base plus three bonuses you can see itemised the moment it ends:
+
+```
+  you placed 1st
+
+  base             +11
+  win bonus        +15
+  accuracy bonus    +8
+  speed bonus       +5
+  ────────────────────
+  total            +39 bytes
+
+  balance          287 bytes
+```
+
+Only the base is random. The rest is deterministic, so the breakdown is something you can learn
+from: the placement bonus pays for each racer you actually beat, which is why winning a full
+lobby is worth well over winning a duel, and why re-racing the same two people is the slowest
+way to earn. A race you do not finish pays nothing at all.
+
+Practice pays a trickle on the same rules, minus the placement — enough that being alone on the
+server still gets you somewhere, little enough that racing is obviously the point.
+
+Cosmetics run from 120 bytes for a race bar to 500 for a rare name colour, so the first one is
+four or five races away. Buying something wears it; pressing enter on it again puts it away.
+Nothing is ever lost: prices are recorded as paid, so the catalogue can be repriced without
+touching anyone's balance.
+
+Your balance is not stored anywhere. It is computed as everything you have earned less
+everything you have bought, which is why it cannot drift out of step with the history behind
+it — and why merging two accounts refunds any cosmetic they both owned.
+
 ## Accounts and history
 
-Everything above works without a database. Passing `-dsn` (or setting `TYPESAFE_DSN`) to a
-PostgreSQL connection string turns on accounts, run history and the profile screen:
+Practice and racing work without a database; bytes and cosmetics, like the profile, need
+somewhere to keep them. Passing `-dsn` (or setting `TYPESAFE_DSN`) to a PostgreSQL connection
+string turns on accounts, run history, the profile screen and the shop:
 
 ```sh
 go run ./cmd/server -dsn 'postgres://typesafe:typesafe@localhost:5432/typesafe?sslmode=disable'
@@ -50,10 +93,12 @@ go run ./cmd/server -dsn 'postgres://typesafe:typesafe@localhost:5432/typesafe?s
 The schema is created and migrated on startup; there is nothing to run by hand.
 
 **Without a DSN the server still works.** Practice and racing behave exactly as they always did,
-sessions are anonymous, and the account-dependent menu items are shown greyed out rather than
-hidden, so the reason is visible. The database is never on the typing path: writes are queued
-and dropped rather than allowed to block a keystroke, and reads happen off the update loop. A
-database that falls over mid-race costs you the record of that race and nothing else.
+sessions are anonymous, no bytes are earned or promised, and the account-dependent menu items
+are shown greyed out rather than hidden, so the reason is visible. The database is never on the
+typing path: writes are queued and dropped rather than allowed to block a keystroke, and reads
+happen off the update loop — a race's bytes ride in the same row as the race, so finishing one
+still costs a single queued statement. A database that falls over mid-race costs you the record
+of that race, and the bytes it would have paid, and nothing else.
 
 A DSN that is set but unreachable *at startup* is a hard failure, deliberately — otherwise a
 typo yields a server that passes every health check while quietly recording nothing.

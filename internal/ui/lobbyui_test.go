@@ -16,10 +16,9 @@ func twoContexts() (host, guest *Context) {
 	store := lobby.NewStore(lobby.WithCountdown(1, time.Millisecond))
 
 	mk := func(name, id string) *Context {
-		return &Context{
-			Username: name, PlayerID: id, Store: store,
-			Styles: NewStyles(testRenderer()), Width: 80, Height: 24,
-		}
+		cfg := testConfig()
+		cfg.Username, cfg.PlayerID, cfg.Store = name, id, store
+		return newContext(cfg)
 	}
 	return mk("alice", "alice-id"), mk("bob", "bob-id")
 }

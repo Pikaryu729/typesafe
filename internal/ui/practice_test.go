@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Pikaryu729/typesafe/internal/economy"
 	"github.com/Pikaryu729/typesafe/internal/typing"
 )
 
@@ -168,7 +169,7 @@ func TestPracticeViewShowsPassageAndStats(t *testing.T) {
 }
 
 func TestResultsRetryStartsNewPractice(t *testing.T) {
-	res := newResults(newTestContext(), typing.Stats{})
+	res := newResults(newTestContext(), typing.Stats{}, economy.Award{})
 	_, cmd := res.Update(key("r"))
 
 	if _, ok := cmd().(navigateMsg).to.(Practice); !ok {
@@ -177,7 +178,7 @@ func TestResultsRetryStartsNewPractice(t *testing.T) {
 }
 
 func TestResultsEscapeReturnsToMenu(t *testing.T) {
-	res := newResults(newTestContext(), typing.Stats{})
+	res := newResults(newTestContext(), typing.Stats{}, economy.Award{})
 	_, cmd := res.Update(key("esc"))
 
 	if _, ok := cmd().(navigateMsg).to.(Menu); !ok {
@@ -190,7 +191,7 @@ func TestResultsViewShowsTheFigures(t *testing.T) {
 		WPM: 82.4, RawWPM: 90.1, Accuracy: 0.955,
 		Elapsed: 12300 * time.Millisecond, Correct: 100, Incorrect: 5, Keystrokes: 110,
 	}
-	view := plain(newResults(newTestContext(), stats).View())
+	view := plain(newResults(newTestContext(), stats, economy.Award{}).View())
 
 	for _, want := range []string{"82", "96%", "12.3s", "100 correct", "5 wrong", "110 keystrokes", "90 raw wpm"} {
 		if !strings.Contains(view, want) {

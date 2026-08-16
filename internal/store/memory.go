@@ -13,11 +13,12 @@ import (
 // should need Postgres — and it doubles as the reference for what the SQL is
 // supposed to do.
 type Memory struct {
-	mu    sync.Mutex
-	users map[string]User   // id -> user
-	keys  map[string]string // fingerprint -> user id
-	runs  map[string][]Run  // user id -> runs, newest first
-	codes map[string]memCode
+	mu        sync.Mutex
+	users     map[string]User    // id -> user
+	keys      map[string]string  // fingerprint -> user id
+	runs      map[string][]Run   // user id -> runs, newest first
+	purchases map[string][]Owned // user id -> cosmetics owned, oldest first
+	codes     map[string]memCode
 
 	now func() time.Time
 }
@@ -39,11 +40,12 @@ func WithMemoryClock(now func() time.Time) MemoryOption {
 // NewMemory returns an empty in-memory repository.
 func NewMemory(opts ...MemoryOption) *Memory {
 	m := &Memory{
-		users: make(map[string]User),
-		keys:  make(map[string]string),
-		runs:  make(map[string][]Run),
-		codes: make(map[string]memCode),
-		now:   time.Now,
+		users:     make(map[string]User),
+		keys:      make(map[string]string),
+		runs:      make(map[string][]Run),
+		purchases: make(map[string][]Owned),
+		codes:     make(map[string]memCode),
+		now:       time.Now,
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -106,6 +108,90 @@ func (m *Memory) Summary(_ context.Context, userID string) (Summary, error) {
 	return Summarize(m.runs[userID]), nil
 }
 
+func (m *Memory) Wallet(_ context.Context, userID string) (Wallet, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.walletLocked(userID), nil
+}
+
+// walletLocked builds a wallet from the two things it is derived from. Buy and
+// Equip return one too, so this exists to keep them from re-taking the lock.
+func (m *Memory) walletLocked(userID string) Wallet {
+	return Wallet{
+		Balance: Balance(m.runs[userID], m.purchases[userID]),
+		Owned:   slices.Clone(m.purchases[userID]),
+	}
+}
+
+func (m *Memory) Buy(_ context.Context, userID string, item Owned) (Wallet, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, o := range m.purchases[userID] {
+		if o.ID == item.ID {
+			return Wallet{}, ErrAlreadyOwned
+		}
+	}
+	if Balance(m.runs[userID], m.purchases[userID]) < item.Price {
+		return Wallet{}, ErrInsufficientFunds
+	}
+
+	if item.BoughtAt.IsZero() {
+		item.BoughtAt = m.now()
+	}
+	// A purchase is never equipped by the act of buying it; the caller equips
+	// it afterwards, through the one path that enforces one per slot.
+	item.Equipped = false
+	m.purchases[userID] = append(m.purchases[userID], item)
+	return m.walletLocked(userID), nil
+}
+
+func (m *Memory) Equip(_ context.Context, userID, slot, cosmeticID string) (Wallet, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	owned := m.purchases[userID]
+	if cosmeticID != "" && !slices.ContainsFunc(owned, func(o Owned) bool {
+		return o.ID == cosmeticID && o.Slot == slot
+	}) {
+		return Wallet{}, ErrNotOwned
+	}
+
+	// Clear the slot first, then wear the one. Doing it in that order is what
+	// makes an empty cosmeticID mean "back to the default" without a branch.
+	for i := range owned {
+		if owned[i].Slot == slot {
+			owned[i].Equipped = owned[i].ID == cosmeticID
+		}
+	}
+	return m.walletLocked(userID), nil
+}
+
+// mergePurchasesLocked moves the source account's cosmetics onto the target.
+//
+// Two rules, both of which the SQL repeats. A cosmetic the target already owns
+// is dropped rather than moved, because owning one twice is not a thing; since
+// a balance is earned less bought, dropping that row hands its price back —
+// the duplicate is refunded, which is the only fair outcome. And everything
+// that moves arrives unequipped, so two accounts wearing different colours
+// cannot merge into one wearing both.
+func (m *Memory) mergePurchasesLocked(targetID, sourceID string) {
+	held := make(map[string]bool, len(m.purchases[targetID]))
+	for _, o := range m.purchases[targetID] {
+		held[o.ID] = true
+	}
+
+	for _, o := range m.purchases[sourceID] {
+		if held[o.ID] {
+			continue
+		}
+		o.Equipped = false
+		m.purchases[targetID] = append(m.purchases[targetID], o)
+	}
+	delete(m.purchases, sourceID)
+}
+
 func (m *Memory) CreateLinkCode(_ context.Context, userID string) (LinkCode, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -148,6 +234,7 @@ func (m *Memory) RedeemLinkCode(_ context.Context, code, fingerprint string) (Us
 	m.runs[target.ID] = append(m.runs[target.ID], m.runs[source]...)
 	slices.SortFunc(m.runs[target.ID], func(a, b Run) int { return b.CreatedAt.Compare(a.CreatedAt) })
 	delete(m.runs, source)
+	m.mergePurchasesLocked(target.ID, source)
 	for fp, id := range m.keys {
 		if id == source {
 			m.keys[fp] = target.ID

@@ -34,7 +34,8 @@ type Context struct {
 	// Fingerprint is this session's public key, needed to attach it to another
 	// account when a link code is redeemed.
 	Fingerprint string
-	// Repo persists accounts and runs, or is nil when there is no database.
+	// Repo persists accounts, runs and wallets, or is nil when there is no
+	// database.
 	// Every use must tolerate nil: practising and racing do not depend on it.
 	Repo store.Repository
 	// Balance is this session's bytes, kept here so the menu can show a figure

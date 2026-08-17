@@ -23,8 +23,8 @@ type Config struct {
 	// Fingerprint identifies this session's public key, so it can be attached
 	// to another account from the link screen.
 	Fingerprint string
-	// Repo persists accounts and runs. Nil is valid and means the app runs
-	// exactly as it did before there was a database.
+	// Repo persists accounts, runs and wallets. Nil is valid and means the app
+	// runs exactly as it did before there was a database.
 	Repo store.Repository
 	// Wallet is the balance and cosmetics this account connected with, read
 	// once at login. A zero Wallet is what an anonymous session gets.

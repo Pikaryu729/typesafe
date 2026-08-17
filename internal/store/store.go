@@ -1,4 +1,4 @@
-// Package store persists accounts and finished typing runs.
+// Package store persists accounts, finished typing runs and wallets.
 //
 // Identity comes from the client's SSH public key rather than a password: the
 // server already authenticated the key, so its fingerprint is a stable handle

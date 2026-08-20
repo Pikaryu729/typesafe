@@ -276,17 +276,27 @@ func resolveUser(sess ssh.Session, repo store.Repository, fingerprint string) st
 // typist with nothing bought and nothing saved up, which is a state the whole
 // app already handles — so it must not refuse the connection.
 func loadWallet(sess ssh.Session, repo store.Repository, user store.User) store.Wallet {
+	return loadWalletContext(sess.Context(), sess.User(), repo, user)
+}
+
+func loadWalletContext(parent context.Context, username string, repo store.Repository, user store.User) store.Wallet {
 	if repo == nil || user.ID == "" {
 		return store.Wallet{}
 	}
 
-	ctx, cancel := context.WithTimeout(sess.Context(), resolveTimeout)
+	ctx, cancel := context.WithTimeout(parent, resolveTimeout)
 	defer cancel()
+
+	if err := store.Flush(ctx, repo); err != nil {
+		log.Error("could not flush wallet writes; continuing with none",
+			"user", username, "error", err)
+		return store.Wallet{}
+	}
 
 	w, err := repo.Wallet(ctx, user.ID)
 	if err != nil {
 		log.Error("could not load wallet; continuing with none",
-			"user", sess.User(), "error", err)
+			"user", username, "error", err)
 		return store.Wallet{}
 	}
 	return w

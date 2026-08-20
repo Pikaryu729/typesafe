@@ -430,6 +430,10 @@ func (r *Repo) RedeemLinkCode(ctx context.Context, code, fingerprint string) (st
 		// Fold the whole source account into the target — its runs and every
 		// other key that reached it — then drop the empty account. Order
 		// matters: the rows have to move before the cascade could take them.
+		// The account lock covers writes already queued when this merge starts;
+		// a write that acquires it after the account is deleted is not remapped.
+		// That narrow loss window is preferable to preserving a permanent
+		// tombstone or redirect for an account that has been intentionally emptied.
 		if _, err := tx.Exec(ctx, `update runs set user_id = $1 where user_id = $2`, targetID, sourceID); err != nil {
 			return store.User{}, fmt.Errorf("move runs: %w", err)
 		}

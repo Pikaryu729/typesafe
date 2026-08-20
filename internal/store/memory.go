@@ -230,7 +230,10 @@ func (m *Memory) RedeemLinkCode(_ context.Context, code, fingerprint string) (Us
 	}
 
 	// Fold the source account into the target: its runs and every key that
-	// reached it, then drop the empty shell.
+	// reached it, then drop the empty shell. The mutex serializes this merge
+	// with writes already in progress; a write arriving after deletion is
+	// deliberately not redirected, avoiding a permanent tombstone for an
+	// account that has been intentionally emptied.
 	m.runs[target.ID] = append(m.runs[target.ID], m.runs[source]...)
 	slices.SortFunc(m.runs[target.ID], func(a, b Run) int { return b.CreatedAt.Compare(a.CreatedAt) })
 	delete(m.runs, source)

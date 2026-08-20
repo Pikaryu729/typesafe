@@ -87,6 +87,7 @@ func (l Link) applyLinked(msg linkedMsg) Link {
 	l.ctx.Username = msg.user.DisplayName
 	l.linkedTo = msg.user.DisplayName
 	if !msg.loaded {
+		l.ctx.applyWallet(store.Wallet{})
 		l.err = "linked, but could not load your wallet"
 		return l
 	}

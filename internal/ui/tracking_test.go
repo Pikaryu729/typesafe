@@ -314,6 +314,53 @@ func TestLinkReloadsTheMergedWallet(t *testing.T) {
 	}
 }
 
+func TestLinkClearsWalletWhenMergedWalletCannotLoad(t *testing.T) {
+	bg := context.Background()
+	repo := store.NewMemory()
+	target, _ := repo.ResolveUser(bg, "SHA256:target", "laptop")
+	source, _ := repo.ResolveUser(bg, "SHA256:source", "desktop")
+	if err := repo.RecordRun(bg, store.Run{UserID: source.ID, Earned: 300}); err != nil {
+		t.Fatalf("RecordRun: %v", err)
+	}
+	if _, err := repo.Buy(bg, source.ID, store.Owned{ID: "bar-dots", Slot: "bar", Price: 120}); err != nil {
+		t.Fatalf("Buy: %v", err)
+	}
+	if _, err := repo.Equip(bg, source.ID, "bar", "bar-dots"); err != nil {
+		t.Fatalf("Equip: %v", err)
+	}
+	code, err := repo.CreateLinkCode(bg, target.ID)
+	if err != nil {
+		t.Fatalf("CreateLinkCode: %v", err)
+	}
+
+	ctx := newTestContext()
+	ctx.Repo, ctx.User, ctx.Fingerprint = repo, source, "SHA256:source"
+	wallet, _ := repo.Wallet(bg, source.ID)
+	ctx.applyWallet(wallet)
+	ctx.Repo = failingRepo{Repository: repo}
+
+	screen, _ := NewLink(ctx).Update(key("enter"))
+	screen, _ = screen.Update(key(code.Code))
+	screen, cmd := screen.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("redeeming a code produced no command")
+	}
+	screen, _ = screen.Update(cmd())
+
+	if ctx.User.ID != target.ID {
+		t.Errorf("session account = %q, want target %q", ctx.User.ID, target.ID)
+	}
+	if ctx.Balance != 0 {
+		t.Errorf("stale merged balance = %d, want zero", ctx.Balance)
+	}
+	if got := ctx.flair().Bar; got != "" {
+		t.Errorf("stale merged flair wears %q, want empty", got)
+	}
+	if got := plain(screen.View()); !strings.Contains(got, "could not load your wallet") {
+		t.Errorf("view does not report the wallet failure:\n%s", got)
+	}
+}
+
 func TestLinkRejectsNonASCIICodeInput(t *testing.T) {
 	ctx, _ := trackedContext(t)
 

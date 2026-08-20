@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Pikaryu729/typesafe/internal/cosmetics"
 	"github.com/Pikaryu729/typesafe/internal/store"
@@ -248,22 +249,175 @@ func TestShopSurvivesADatabaseThatIsDown(t *testing.T) {
 	}
 }
 
-func TestShopIsOnTheMenuAndNeedsAnAccount(t *testing.T) {
-	var shop menuItem
-	for _, it := range menuItems {
-		if it.title == "Shop" {
-			shop = it
+// selectMenuRow moves the cursor onto a named menu row by pressing the keys a
+// typist would, so a test does not need to know the row's index.
+func selectMenuRow(t *testing.T, s Screen, title string) Screen {
+	t.Helper()
+
+	for range len(menuItems) + 1 {
+		if strings.Contains(plain(s.View()), "> "+title) {
+			return s
 		}
+		s, _ = s.Update(key("down"))
 	}
-	if shop.title == "" {
-		t.Fatal("the Shop is not on the menu")
+	t.Fatalf("%q never became the selected row:\n%s", title, plain(s.View()))
+	return s
+}
+
+func TestShopIsReachableFromTheMenuWithAnAccount(t *testing.T) {
+	ctx, _ := richContext(t, 300)
+
+	m := selectMenuRow(t, NewMenu(ctx), "Shop")
+	_, cmd := m.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("selecting Shop produced no command")
 	}
-	if !shop.needsAccount {
-		t.Error("the Shop is offered to sessions with no wallet")
+	nav, ok := cmd().(navigateMsg)
+	if !ok {
+		t.Fatalf("selecting Shop produced %T, want navigateMsg", cmd())
+	}
+	if _, ok := nav.to.(Shop); !ok {
+		t.Errorf("selecting Shop opened %T", nav.to)
+	}
+}
+
+func TestShopIsInertWithoutAnAccountAndSaysWhy(t *testing.T) {
+	// An anonymous session has no wallet, so the row has to stay visible and
+	// explain itself rather than vanish.
+	m := Screen(NewMenu(newTestContext()))
+
+	view := plain(m.View())
+	if !strings.Contains(view, "Shop") {
+		t.Fatalf("the Shop row disappeared for an anonymous session:\n%s", view)
+	}
+	if !strings.Contains(view, "(no account on this server)") {
+		t.Errorf("the Shop row does not say why it is unavailable:\n%s", view)
 	}
 
-	// Quit has to stay last: the menu tests walk to the end and press enter.
-	if got := menuItems[len(menuItems)-1].title; got != "Quit" {
-		t.Errorf("the last menu item is %q, want Quit", got)
+	// A disabled row never draws the cursor, so there is no way to see which
+	// one is selected. Press enter on every row instead: none of them may open
+	// the shop, which is a stronger claim than checking one index anyway.
+	for range len(menuItems) {
+		if _, cmd := m.Update(key("enter")); cmd != nil {
+			if nav, ok := cmd().(navigateMsg); ok {
+				if _, isShop := nav.to.(Shop); isShop {
+					t.Fatal("an anonymous session reached the shop")
+				}
+			}
+		}
+		m, _ = m.Update(key("down"))
+	}
+}
+
+// slowRepo delays every write, so a read that does not wait for the write
+// queue is certain to miss it rather than merely likely to.
+type slowRepo struct {
+	store.Repository
+	delay time.Duration
+}
+
+func (r slowRepo) RecordRun(ctx context.Context, run store.Run) error {
+	time.Sleep(r.delay)
+	return r.Repository.RecordRun(ctx, run)
+}
+
+// TestShopSeesBytesTheSessionJustEarned reproduces the balance regression: the
+// award is queued through store.Async, and a wallet read that does not wait for
+// it reports the balance from before the race — briefly refusing a purchase the
+// typist can afford.
+func TestShopSeesBytesTheSessionJustEarned(t *testing.T) {
+	mem := store.NewMemory()
+	repo := store.NewAsync(slowRepo{Repository: mem, delay: 150 * time.Millisecond}, 8, nil)
+	t.Cleanup(func() { _ = repo.Close() })
+
+	user, err := mem.ResolveUser(context.Background(), "SHA256:test", "tester")
+	if err != nil {
+		t.Fatalf("ResolveUser: %v", err)
+	}
+
+	ctx := newTestContext()
+	ctx.Repo, ctx.User, ctx.Fingerprint = repo, user, "SHA256:test"
+
+	// Bank an award the way a finished race does: queued, not yet written.
+	if err := repo.RecordRun(context.Background(), store.Run{
+		UserID: user.ID, Mode: store.ModeRace, WPM: 80, Accuracy: 0.97, Earned: 300,
+	}); err != nil {
+		t.Fatalf("RecordRun: %v", err)
+	}
+	ctx.Balance += 300
+
+	// The hazard: without waiting, the underlying store has nothing yet.
+	if runs, _ := mem.RecentRuns(context.Background(), user.ID, 10); len(runs) != 0 {
+		t.Fatal("the write landed before the shop opened; this test proves nothing")
+	}
+
+	shop := openShop(t, ctx)
+
+	if shop.wallet.Balance != 300 {
+		t.Errorf("the shop read a balance of %d, want 300 — it did not wait for the award",
+			shop.wallet.Balance)
+	}
+	if ctx.Balance != 300 {
+		t.Errorf("the session balance dropped to %d after a load, want 300", ctx.Balance)
+	}
+
+	// The symptom the typist would have seen: a purchase they can afford
+	// refused because the read was stale.
+	after := press(t, selectItem(t, shop, "bar-dots"), "enter").(Shop)
+	if strings.Contains(plain(after.View()), "short") {
+		t.Errorf("a purchase the typist could afford was refused:\n%s", plain(after.View()))
+	}
+	if !after.wallet.Owns("bar-dots") {
+		t.Error("the purchase did not go through")
+	}
+}
+
+// equipFailsRepo takes the money but refuses to wear the cosmetic, which is the
+// partial failure buy() has to survive: the two calls are each atomic, the pair
+// is not.
+type equipFailsRepo struct {
+	*store.Memory
+}
+
+func (equipFailsRepo) Equip(context.Context, string, string, string) (store.Wallet, error) {
+	return store.Wallet{}, errDown
+}
+
+func TestShopKeepsAPurchaseWhoseEquipFailed(t *testing.T) {
+	ctx, mem := richContext(t, 300)
+	ctx.Repo = equipFailsRepo{Memory: mem}
+
+	shop := openShop(t, ctx)
+	after := press(t, selectItem(t, shop, "bar-dots"), "enter").(Shop)
+
+	// The purchase stands, so the screen must know it is owned.
+	if !after.wallet.Owns("bar-dots") {
+		t.Fatal("the successful purchase was discarded when wearing it failed")
+	}
+	if after.wallet.Balance != 180 {
+		t.Errorf("the shop shows %d bytes, want 180 — it is showing money already spent",
+			after.wallet.Balance)
+	}
+	if ctx.Balance != 180 {
+		t.Errorf("the session balance is %d, want 180", ctx.Balance)
+	}
+
+	// It is a half-done action, not a broken shop: the catalogue stays up and
+	// the note explains what happened.
+	view := plain(after.View())
+	if strings.Contains(view, "could not reach the shop") {
+		t.Errorf("a half-done purchase replaced the shop with an error screen:\n%s", view)
+	}
+	if !strings.Contains(view, "Blocks") {
+		t.Errorf("the catalogue disappeared:\n%s", view)
+	}
+	if !strings.Contains(view, "could not wear it") {
+		t.Errorf("the shop does not say the cosmetic was not worn:\n%s", view)
+	}
+
+	// And pressing enter again tries to wear it rather than to buy it twice.
+	again := press(t, after, "enter").(Shop)
+	if strings.Contains(plain(again.View()), "you already own that") {
+		t.Errorf("the next press tried to re-buy an owned cosmetic:\n%s", plain(again.View()))
 	}
 }

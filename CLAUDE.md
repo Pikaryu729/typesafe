@@ -213,6 +213,12 @@ Three rules here too:
 2. **Earnings ride in the run's own row.** `store.Run.Earned` is set by the session that records
    the attempt, so a finished race still costs the typing path exactly one queued statement and
    a run can never disagree with what it paid. Do not add a second write here.
+
+   The cost of that is a write the session has not seen land. **A reader that must observe the
+   session's own recent writes calls `store.Flush` first** — `Async` queues, so a wallet read
+   issued straight after an award would otherwise derive a balance from before it, dip on screen
+   and briefly refuse an affordable purchase. `Flush` is an optional interface, so it is a no-op
+   for `Memory` and `pg.Repo`, which have already written by the time they return.
 3. **A purchase records the price as paid.** Repricing the catalogue must not reach backwards
    into anyone's balance. `Buy` is atomic under an advisory lock on the account, because one
    person can hold several sessions and really can spend the same bytes twice.

@@ -204,6 +204,32 @@ type Repository interface {
 	RedeemLinkCode(ctx context.Context, code, fingerprint string) (User, error)
 }
 
+// Flusher is implemented by a Repository that queues writes instead of
+// performing them inline, and can wait for that queue to drain.
+//
+// It is an optional interface rather than part of Repository because it means
+// nothing to an implementation that writes synchronously: Memory and the
+// Postgres repository have already done the write by the time they return, so
+// they have nothing to wait for. Async is the one that queues.
+type Flusher interface {
+	Flush(ctx context.Context) error
+}
+
+// Flush waits for any writes repo has queued to be attempted.
+//
+// A reader that has to see the session's own recent writes calls this first —
+// a balance is derived from stored runs, so reading one before the run that
+// paid it has landed reports a figure from before the award. A repository that
+// does not queue is already up to date, which is what makes this a no-op for
+// it rather than an error.
+func Flush(ctx context.Context, repo Repository) error {
+	f, ok := repo.(Flusher)
+	if !ok {
+		return nil
+	}
+	return f.Flush(ctx)
+}
+
 // Summarize aggregates runs, newest first, into a Summary.
 //
 // It is the definition of what these figures mean. Memory calls it directly;

@@ -18,6 +18,13 @@ import (
 // afterwards is the same either way.
 type walletMsg struct {
 	wallet store.Wallet
+	// loaded reports whether wallet holds a real reading.
+	//
+	// It is separate from err because the two are not opposites: a purchase
+	// that succeeded and then failed to be worn carries both a wallet worth
+	// showing and an error worth saying. An implicit test such as "Owned is
+	// non-empty" would quietly get that case wrong.
+	loaded bool
 	// note is what the last action did, shown until the next one. Errors from
 	// a purchase are ordinary outcomes, not failures, so they go here too.
 	note string
@@ -92,8 +99,16 @@ func (s Shop) load() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
 		defer cancel()
 
+		// Wait for this session's own queued writes before reading. A balance
+		// is derived from stored runs, so reading before the race that just
+		// paid out has landed shows a figure from before the award — and
+		// refuses a purchase the typist can already afford.
+		if err := store.Flush(ctx, repo); err != nil {
+			return walletMsg{err: err}
+		}
+
 		w, err := repo.Wallet(ctx, userID)
-		return walletMsg{wallet: w, err: err}
+		return walletMsg{wallet: w, loaded: err == nil, err: err}
 	}
 }
 
@@ -103,7 +118,7 @@ func (s Shop) buy(it cosmetics.Item) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
 		defer cancel()
 
-		w, err := repo.Buy(ctx, userID, store.Owned{
+		bought, err := repo.Buy(ctx, userID, store.Owned{
 			ID: it.ID, Slot: string(it.Slot), Price: it.Price,
 		})
 		if err != nil {
@@ -111,8 +126,17 @@ func (s Shop) buy(it cosmetics.Item) tea.Cmd {
 		}
 		// Buying something is the moment you want to wear it, so the purchase
 		// equips it rather than making the typist press the key twice.
-		w, err = repo.Equip(ctx, userID, string(it.Slot), it.ID)
-		return walletMsg{wallet: w, note: "bought and equipped " + it.Name, err: err}
+		//
+		// The two calls are each atomic but the pair is not, so the wallet the
+		// purchase produced is carried out even when wearing it fails. Dropping
+		// it would leave the screen showing a balance that has already been
+		// spent on a cosmetic it does not know is owned, and the next enter
+		// would try to buy it again.
+		worn, err := repo.Equip(ctx, userID, string(it.Slot), it.ID)
+		if err != nil {
+			return walletMsg{wallet: bought, loaded: true, note: "bought " + it.Name, err: err}
+		}
+		return walletMsg{wallet: worn, loaded: true, note: "bought and equipped " + it.Name}
 	}
 }
 
@@ -127,7 +151,7 @@ func (s Shop) equip(it cosmetics.Item, wear bool) tea.Cmd {
 		defer cancel()
 
 		w, err := repo.Equip(ctx, userID, string(it.Slot), id)
-		return walletMsg{wallet: w, note: note, err: err}
+		return walletMsg{wallet: w, loaded: err == nil, note: note, err: err}
 	}
 }
 
@@ -135,9 +159,26 @@ func (s Shop) Update(msg tea.Msg) (Screen, tea.Cmd) {
 	switch msg := msg.(type) {
 	case walletMsg:
 		s.loading, s.busy = false, false
+
+		if msg.loaded {
+			s.wallet, s.err = msg.wallet, nil
+			// Context is shared by pointer, so this is what makes a newly
+			// equipped theme reach every screen built afterwards.
+			s.ctx.applyWallet(msg.wallet)
+
+			// A wallet arriving alongside an error is a half-done action, not
+			// a broken shop: the purchase stands, only wearing it did not. Say
+			// so on the note line instead of replacing a usable screen.
+			s.note = msg.note
+			if msg.err != nil {
+				s.note = msg.note + " — could not wear it just now, press enter to try again"
+			}
+			return s, nil
+		}
+
 		if msg.err != nil {
-			// A refusal is not a broken screen: keep the wallet on show and
-			// say why the key did nothing.
+			// A refusal is not a broken screen either: keep the wallet on show
+			// and say why the key did nothing.
 			if note, ok := refusal(msg.err); ok {
 				s.note = note
 				return s, nil
@@ -145,10 +186,7 @@ func (s Shop) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			s.err = msg.err
 			return s, nil
 		}
-		s.wallet, s.note, s.err = msg.wallet, msg.note, nil
-		// Context is shared by pointer, so this is what makes a newly equipped
-		// theme reach every screen built afterwards.
-		s.ctx.applyWallet(msg.wallet)
+		s.note, s.err = msg.note, nil
 		return s, nil
 
 	case tea.KeyMsg:

@@ -307,3 +307,77 @@ func (b *blockingRepo) RecordRun(ctx context.Context, r store.Run) error {
 	<-b.release
 	return b.Repository.RecordRun(ctx, r)
 }
+
+func TestAsyncFlushWaitsForQueuedWrites(t *testing.T) {
+	ctx := context.Background()
+	mem := store.NewMemory()
+	release := make(chan struct{})
+	blocking := &blockingRepo{Repository: mem, release: release}
+
+	a := store.NewAsync(blocking, 8, nil)
+	t.Cleanup(func() { _ = a.Close() })
+
+	if err := a.RecordRun(ctx, run("u1", 60)); err != nil {
+		t.Fatalf("RecordRun: %v", err)
+	}
+
+	// While the write is held, the underlying store genuinely has nothing —
+	// which is the stale read a balance would otherwise be derived from.
+	if runs, _ := mem.RecentRuns(ctx, "u1", 10); len(runs) != 0 {
+		t.Fatal("the write landed before it was released; this test proves nothing")
+	}
+
+	flushed := make(chan error, 1)
+	go func() { flushed <- store.Flush(ctx, a) }()
+
+	select {
+	case err := <-flushed:
+		t.Fatalf("Flush returned while a write was still queued (err %v)", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case err := <-flushed:
+		if err != nil {
+			t.Fatalf("Flush: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Flush never returned after the write was released")
+	}
+
+	if runs, _ := mem.RecentRuns(ctx, "u1", 10); len(runs) != 1 {
+		t.Errorf("got %d runs after Flush, want 1", len(runs))
+	}
+}
+
+func TestFlushIsANoOpForARepositoryThatDoesNotQueue(t *testing.T) {
+	// Memory writes inline, so there is nothing to wait for and nothing to
+	// fail. Callers must not have to know which kind of repository they hold.
+	if err := store.Flush(context.Background(), store.NewMemory()); err != nil {
+		t.Errorf("Flush on a synchronous repository: %v", err)
+	}
+	if err := store.Flush(context.Background(), nil); err != nil {
+		t.Errorf("Flush on a nil repository: %v", err)
+	}
+}
+
+func TestAsyncFlushAfterCloseDoesNotHang(t *testing.T) {
+	a := store.NewAsync(store.NewMemory(), 4, nil)
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- store.Flush(context.Background(), a) }()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, store.ErrClosed) {
+			t.Errorf("Flush after Close = %v, want ErrClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Flush hung on a closed repository")
+	}
+}

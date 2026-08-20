@@ -93,8 +93,7 @@ func (a Award) Empty() bool { return a.Total == 0 && len(a.Lines) == 0 }
 type RaceInput struct {
 	// Place is 1-based. Zero means they did not finish.
 	Place int
-	// Racers is how many players were in the standings, finishers and
-	// non-finishers alike.
+	// Racers is how many racers finished the passage.
 	Racers   int
 	WPM      float64
 	Accuracy float64 // in [0,1]

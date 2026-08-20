@@ -69,6 +69,21 @@ func TestRaceAwardLineValues(t *testing.T) {
 	}
 }
 
+func TestPlacementCountsOnlyFinishedRacers(t *testing.T) {
+	one := economy.AwardRace(testRand(), economy.RaceInput{
+		Place: 1, Racers: 1, WPM: 60, Accuracy: 0.95,
+	})
+	duel := economy.AwardRace(testRand(), economy.RaceInput{
+		Place: 1, Racers: 2, WPM: 60, Accuracy: 0.95,
+	})
+
+	oneBonus, _ := lineAmount(one, "win bonus")
+	duelBonus, _ := lineAmount(duel, "win bonus")
+	if oneBonus != 12 || duelBonus != 15 {
+		t.Errorf("win bonuses = %d and %d, want 12 and 15", oneBonus, duelBonus)
+	}
+}
+
 func TestBeatingMorePeoplePaysMore(t *testing.T) {
 	small := economy.AwardRace(testRand(), economy.RaceInput{Place: 1, Racers: 2, WPM: 60, Accuracy: 0.95})
 	big := economy.AwardRace(testRand(), economy.RaceInput{Place: 1, Racers: 5, WPM: 60, Accuracy: 0.95})

@@ -98,6 +98,29 @@ func TestProfileShowsBestsAndRuns(t *testing.T) {
 	}
 }
 
+func TestProfileFlushesTheSessionsQueuedRunBeforeReading(t *testing.T) {
+	mem := store.NewMemory()
+	repo := store.NewAsync(slowRepo{Repository: mem, delay: 100 * time.Millisecond}, 4, nil)
+	t.Cleanup(func() { _ = repo.Close() })
+
+	user, err := mem.ResolveUser(context.Background(), "SHA256:test", "tester")
+	if err != nil {
+		t.Fatalf("ResolveUser: %v", err)
+	}
+	ctx := newTestContext()
+	ctx.Repo, ctx.User = repo, user
+	if err := repo.RecordRun(context.Background(), store.Run{
+		UserID: user.ID, Mode: store.ModePractice, WPM: 80, Accuracy: 0.95,
+	}); err != nil {
+		t.Fatalf("RecordRun: %v", err)
+	}
+
+	view := plain(loadScreen(t, NewProfile(ctx)).View())
+	if !strings.Contains(view, "1 runs") {
+		t.Errorf("profile omitted the queued run:\n%s", view)
+	}
+}
+
 func TestProfileReportsAFailedLoadWithoutAlarmingTheTypist(t *testing.T) {
 	ctx, _ := trackedContext(t)
 	ctx.Repo = failingRepo{Repository: ctx.Repo}

@@ -63,6 +63,10 @@ func (p Profile) load() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
 		defer cancel()
 
+		if err := store.Flush(ctx, repo); err != nil {
+			return profileLoadedMsg{err: err}
+		}
+
 		summary, err := repo.Summary(ctx, userID)
 		if err != nil {
 			return profileLoadedMsg{err: err}

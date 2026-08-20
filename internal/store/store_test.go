@@ -301,9 +301,14 @@ func TestAsyncRejectsWritesAfterClose(t *testing.T) {
 type blockingRepo struct {
 	store.Repository
 	release chan struct{}
+	started chan struct{}
 }
 
 func (b *blockingRepo) RecordRun(ctx context.Context, r store.Run) error {
+	if b.started != nil {
+		close(b.started)
+		b.started = nil
+	}
 	<-b.release
 	return b.Repository.RecordRun(ctx, r)
 }
@@ -349,6 +354,48 @@ func TestAsyncFlushWaitsForQueuedWrites(t *testing.T) {
 
 	if runs, _ := mem.RecentRuns(ctx, "u1", 10); len(runs) != 1 {
 		t.Errorf("got %d runs after Flush, want 1", len(runs))
+	}
+}
+
+func TestAsyncFlushWaitsWhenItsQueueIsFull(t *testing.T) {
+	ctx := context.Background()
+	mem := store.NewMemory()
+	release := make(chan struct{})
+	started := make(chan struct{})
+	blocking := &blockingRepo{Repository: mem, release: release, started: started}
+	a := store.NewAsync(blocking, 1, nil)
+
+	if err := a.RecordRun(ctx, run("u1", 60)); err != nil {
+		t.Fatalf("RecordRun: %v", err)
+	}
+	<-started
+	if err := a.RecordRun(ctx, run("u1", 61)); err != nil {
+		t.Fatalf("RecordRun: %v", err)
+	}
+
+	flushed := make(chan error, 1)
+	go func() { flushed <- store.Flush(ctx, a) }()
+	select {
+	case err := <-flushed:
+		t.Fatalf("Flush returned while the full queue was pending: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case err := <-flushed:
+		if err != nil {
+			t.Fatalf("Flush: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Flush did not complete after the queue drained")
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if runs, _ := mem.RecentRuns(ctx, "u1", 10); len(runs) != 2 {
+		t.Errorf("got %d runs after Flush, want 2", len(runs))
 	}
 }
 

@@ -129,9 +129,15 @@ func (r Race) recordOwnResult(results []lobby.Result) economy.Award {
 			return economy.Award{}
 		}
 
+		finishers := 0
+		for _, result := range results {
+			if result.Finished {
+				finishers++
+			}
+		}
 		award := r.ctx.awardRace(economy.RaceInput{
 			Place:    res.Place,
-			Racers:   len(results),
+			Racers:   finishers,
 			WPM:      res.WPM,
 			Accuracy: res.Accuracy,
 		})

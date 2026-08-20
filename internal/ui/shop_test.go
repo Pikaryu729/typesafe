@@ -155,6 +155,61 @@ func TestShopRefusesWhatYouCannotAfford(t *testing.T) {
 	}
 }
 
+func TestShopStaysOpenWhileAPurchaseIsInFlight(t *testing.T) {
+	ctx, _ := richContext(t, 300)
+	shop := selectItem(t, openShop(t, ctx), "bar-dots")
+
+	inFlight, cmd := shop.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("purchase produced no command")
+	}
+	stillShop, nav := inFlight.Update(key("esc"))
+	if nav != nil {
+		t.Fatalf("esc navigated away while the purchase was in flight: %T", nav())
+	}
+	shopAfterEscape, ok := stillShop.(Shop)
+	if !ok {
+		t.Fatalf("esc changed screen to %T", stillShop)
+	}
+
+	completed, _ := shopAfterEscape.Update(cmd())
+	if !completed.(Shop).wallet.Owns("bar-dots") {
+		t.Fatal("the in-flight purchase result was lost")
+	}
+}
+
+func TestShopRefreshesWalletAfterAnotherSessionOwnsAnItem(t *testing.T) {
+	ctx, repo := richContext(t, 300)
+	other := newTestContext()
+	other.Repo, other.User = repo, ctx.User
+	wallet, err := repo.Wallet(context.Background(), ctx.User.ID)
+	if err != nil {
+		t.Fatalf("Wallet: %v", err)
+	}
+	other.applyWallet(wallet)
+
+	stale := selectItem(t, openShop(t, ctx), "bar-dots")
+	otherShop := selectItem(t, openShop(t, other), "bar-dots")
+	_ = press(t, otherShop, "enter")
+
+	pending, cmd := stale.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("refused purchase produced no command")
+	}
+	refused, refresh := pending.Update(cmd())
+	if refresh == nil {
+		t.Fatal("a purchase refusal did not refresh the wallet")
+	}
+	loaded, _ := refused.Update(refresh())
+	after := loaded.(Shop)
+	if !after.wallet.Owns("bar-dots") {
+		t.Fatal("refreshed wallet omitted the cosmetic bought by another session")
+	}
+	if ctx.Balance != 180 {
+		t.Errorf("refreshed session balance = %d, want 180", ctx.Balance)
+	}
+}
+
 func TestShopTogglesAnOwnedItemOnAndOff(t *testing.T) {
 	ctx, repo := richContext(t, 300)
 

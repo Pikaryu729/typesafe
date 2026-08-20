@@ -202,7 +202,8 @@ Three rules hold this together:
 
 `internal/economy` decides what an attempt pays; `internal/cosmetics` is the catalogue it is
 spent on. Both are pure, both are tables of constants, and both take their randomness by
-argument so an award is assertable.
+argument so an award is assertable. Race placement rewards count only racers who finish;
+idle lobby members add no beaten-racer bonus.
 
 Three rules here too:
 

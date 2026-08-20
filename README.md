@@ -64,9 +64,9 @@ A race pays a small random base plus three bonuses you can see itemised the mome
 ```
 
 Only the base is random. The rest is deterministic, so the breakdown is something you can learn
-from: the placement bonus pays for each racer you actually beat, which is why winning a full
-lobby is worth well over winning a duel, and why re-racing the same two people is the slowest
-way to earn. A race you do not finish pays nothing at all.
+from: the placement bonus pays for each finisher you actually beat, which is why winning a full
+lobby is worth well over winning a duel, while idle sessions add nothing. A race you do not finish
+pays nothing at all.
 
 Practice pays a trickle on the same rules, minus the placement — enough that being alone on the
 server still gets you somewhere, little enough that racing is obviously the point.

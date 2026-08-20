@@ -180,8 +180,8 @@ func (s Shop) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			// A refusal is not a broken screen either: keep the wallet on show
 			// and say why the key did nothing.
 			if note, ok := refusal(msg.err); ok {
-				s.note = note
-				return s, nil
+				s.loading, s.note = true, note
+				return s, s.load()
 			}
 			s.err = msg.err
 			return s, nil
@@ -198,6 +198,10 @@ func (s Shop) Update(msg tea.Msg) (Screen, tea.Cmd) {
 func (s Shop) handleKey(msg tea.KeyMsg) (Screen, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
+		if s.busy {
+			s.note = "finishing your purchase…"
+			return s, nil
+		}
 		return s, navigate(NewMenu(s.ctx))
 
 	case "up", "k":

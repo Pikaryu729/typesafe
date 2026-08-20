@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -79,6 +80,31 @@ func TestPracticeIgnoresAltCombinations(t *testing.T) {
 
 	if got := s.(Practice).sess.Stats().Keystrokes; got != 0 {
 		t.Errorf("Keystrokes = %d, want 0; alt-combinations are shortcuts", got)
+	}
+}
+
+func TestPracticeDoesNotRecordAQueuedKeyTwiceAfterFinishing(t *testing.T) {
+	ctx, repo := trackedContext(t)
+	p := practiceOver(ctx, "a")
+
+	finished, cmd := p.Update(key("a"))
+	if cmd == nil {
+		t.Fatal("finishing the passage produced no navigation")
+	}
+	stillPractice, lateCmd := finished.(Practice).Update(key("x"))
+	if lateCmd != nil {
+		t.Fatal("a key after finishing produced a second navigation")
+	}
+	if _, ok := stillPractice.(Practice); !ok {
+		t.Fatalf("late key changed screen to %T", stillPractice)
+	}
+
+	runs, err := repo.RecentRuns(context.Background(), ctx.User.ID, 10)
+	if err != nil {
+		t.Fatalf("RecentRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Errorf("got %d recorded attempts, want 1", len(runs))
 	}
 }
 

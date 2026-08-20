@@ -94,9 +94,9 @@ func (a *Async) RecordRun(_ context.Context, run Run) error {
 // Callers are readers, which already run off the update loop inside a tea.Cmd,
 // so waiting here costs nothing that a read did not already cost.
 //
-// A full queue means the barrier could not be placed. Flush returns rather
-// than waiting for room: whatever filled the queue was dropped, so there is
-// nothing coming to wait for, and a reader must not be stuck behind it.
+// If the queue is full, Flush waits for room or until ctx expires. This is
+// intentionally a blocking operation: unlike RecordRun, a reader that needs
+// its own writes to be visible cannot safely proceed past pending writes.
 func (a *Async) Flush(ctx context.Context) error {
 	a.mu.RLock()
 	if a.closed {
@@ -106,9 +106,12 @@ func (a *Async) Flush(ctx context.Context) error {
 	barrier := make(chan struct{})
 	select {
 	case a.queue <- write{done: barrier}:
-	default:
+	case <-a.done:
 		a.mu.RUnlock()
 		return nil
+	case <-ctx.Done():
+		a.mu.RUnlock()
+		return ctx.Err()
 	}
 	a.mu.RUnlock()
 

@@ -18,7 +18,7 @@ import (
 // Two halves of one exchange: on the machine you are already known on, press
 // c for a code; on the new machine, type that code in. The second machine's
 // account — created the moment it first connected — is folded into the first,
-// so no history is lost either way round.
+// so the persisted history comes across with the account.
 type Link struct {
 	ctx *Context
 

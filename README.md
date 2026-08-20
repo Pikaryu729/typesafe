@@ -38,7 +38,7 @@ three are what everyone else in the lobby sees.
 
 **Link a device** — a second machine has a different SSH key, so it starts out as a different
 typist. Press `c` on the machine you are known on, type the code on the new one, and the two
-accounts merge, history and cosmetics included.
+accounts merge, saved history and cosmetics included.
 
 Keys are shown at the bottom of every screen. `ctrl+c` disconnects from anywhere.
 

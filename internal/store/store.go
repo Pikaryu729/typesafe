@@ -197,10 +197,12 @@ type Repository interface {
 	// returns it.
 	//
 	// The key is already attached to an account — every session resolves one at
-	// login — so redeeming merges that account into the target: its runs and
-	// any other keys move across and it is deleted. That is what a typist
-	// means by "this is also me". Redeeming a code issued by your own account
-	// is a no-op.
+	// login — so redeeming merges that account into the target: its runs,
+	// purchases and any other keys move across and it is deleted. A write from
+	// another session that acquires the emptied account after the merge can be
+	// lost; no tombstone is kept for an account that was intentionally emptied.
+	// That is what a typist means by "this is also me". Redeeming a code issued
+	// by your own account is a no-op.
 	RedeemLinkCode(ctx context.Context, code, fingerprint string) (User, error)
 }
 

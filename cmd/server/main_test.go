@@ -20,7 +20,7 @@ func (r *heldWriteRepo) releaseWrite() {
 	r.releaseOnce.Do(func() { close(r.release) })
 }
 
-func (r heldWriteRepo) RecordRun(ctx context.Context, run store.Run) error {
+func (r *heldWriteRepo) RecordRun(ctx context.Context, run store.Run) error {
 	close(r.started)
 	<-r.release
 	return r.Repository.RecordRun(ctx, run)

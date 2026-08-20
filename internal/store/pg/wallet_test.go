@@ -193,7 +193,9 @@ func TestAccountMergesWaitForRunsOnTheSameAccount(t *testing.T) {
 	t.Cleanup(release)
 	runDone := make(chan error, 1)
 	go func() {
-		runDone <- repo.RecordRun(ctx, store.Run{UserID: source.ID, Earned: 42})
+		runDone <- repo.RecordRun(ctx, store.Run{
+			UserID: source.ID, Mode: store.ModePractice, Earned: 42,
+		})
 	}()
 	select {
 	case err := <-runDone:

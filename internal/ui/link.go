@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -129,7 +130,7 @@ func (l Link) handleEntryKey(msg tea.KeyMsg) (Screen, tea.Cmd) {
 		}
 	case tea.KeyRunes:
 		for _, r := range msg.Runes {
-			if len(l.entry) < store.LinkCodeLength {
+			if r < utf8.RuneSelf && len(l.entry) < store.LinkCodeLength {
 				l.entry += strings.ToUpper(string(r))
 			}
 		}

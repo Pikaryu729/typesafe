@@ -314,6 +314,19 @@ func TestLinkReloadsTheMergedWallet(t *testing.T) {
 	}
 }
 
+func TestLinkRejectsNonASCIICodeInput(t *testing.T) {
+	ctx, _ := trackedContext(t)
+
+	s, _ := send(NewLink(ctx), "enter", "é界é")
+	link := s.(Link)
+	if link.entry != "" {
+		t.Errorf("non-ASCII input entered %q", link.entry)
+	}
+	if got := plain(link.View()); !strings.Contains(got, "______") {
+		t.Errorf("link prompt width changed after non-ASCII input:\n%s", got)
+	}
+}
+
 func TestLinkReportsABadCode(t *testing.T) {
 	ctx, _ := trackedContext(t)
 

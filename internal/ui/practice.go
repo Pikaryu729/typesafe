@@ -64,17 +64,19 @@ func (p Practice) Update(msg tea.Msg) (Screen, tea.Cmd) {
 }
 
 func (p Practice) handleKey(msg tea.KeyMsg) (Screen, tea.Cmd) {
-	if p.sess.Finished() {
-		return p, nil
-	}
-
 	switch msg.Type {
 	case tea.KeyEsc:
 		return p, navigate(NewMenu(p.ctx))
 
 	case tea.KeyTab, tea.KeyCtrlR:
 		return NewPractice(p.ctx), tick() // a different passage, not a replay
+	}
 
+	if p.sess.Finished() {
+		return p, nil
+	}
+
+	switch msg.Type {
 	case tea.KeyBackspace:
 		p.sess.Backspace()
 		return p, nil

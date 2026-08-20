@@ -29,3 +29,15 @@ func (r *Repo) CreateExpiredLinkCode(ctx context.Context, userID string) (string
 		code, userID, time.Now().Add(-time.Minute))
 	return code, err
 }
+
+func (r *Repo) HoldAccountLock(ctx context.Context, userID string) (func(), error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, userID); err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, err
+	}
+	return func() { _ = tx.Commit(context.Background()) }, nil
+}

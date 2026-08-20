@@ -104,7 +104,17 @@ func (r *Repo) RecordRun(ctx context.Context, run store.Run) error {
 	if run.CreatedAt.IsZero() {
 		run.CreatedAt = time.Now()
 	}
-	_, err := r.pool.Exec(ctx, `
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, run.UserID); err != nil {
+		return fmt.Errorf("lock account: %w", err)
+	}
+	_, err = tx.Exec(ctx, `
 		insert into runs (
 			user_id, mode, seed, word_count, wpm, raw_wpm, accuracy,
 			duration_ms, keystrokes, correct, incorrect, race_code, place,
@@ -116,6 +126,9 @@ func (r *Repo) RecordRun(ctx context.Context, run store.Run) error {
 		run.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("record run: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("record run commit: %w", err)
 	}
 	return nil
 }
@@ -200,7 +213,20 @@ func (r *Repo) Summary(ctx context.Context, userID string) (store.Summary, error
 // everything bought — and the integration tests compare the two against
 // identical input, the same guard the Summary query has.
 func (r *Repo) Wallet(ctx context.Context, userID string) (store.Wallet, error) {
-	return r.wallet(ctx, r.pool, userID)
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		return store.Wallet{}, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	w, err := r.wallet(ctx, tx, userID)
+	if err != nil {
+		return store.Wallet{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return store.Wallet{}, fmt.Errorf("wallet commit: %w", err)
+	}
+	return w, nil
 }
 
 // querier is the part of pgx a read needs, so the wallet can be rebuilt either
@@ -394,7 +420,13 @@ func (r *Repo) RedeemLinkCode(ctx context.Context, code, fingerprint string) (st
 		}
 	case err != nil:
 		return store.User{}, fmt.Errorf("find current account: %w", err)
-	case sourceID != targetID:
+	default:
+		if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, sourceID); err != nil {
+			return store.User{}, fmt.Errorf("lock account: %w", err)
+		}
+		if sourceID == targetID {
+			break
+		}
 		// Fold the whole source account into the target — its runs and every
 		// other key that reached it — then drop the empty account. Order
 		// matters: the rows have to move before the cascade could take them.

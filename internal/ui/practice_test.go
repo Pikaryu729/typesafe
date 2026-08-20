@@ -106,6 +106,22 @@ func TestPracticeDoesNotRecordAQueuedKeyTwiceAfterFinishing(t *testing.T) {
 	if len(runs) != 1 {
 		t.Errorf("got %d recorded attempts, want 1", len(runs))
 	}
+	if len(runs) == 1 && ctx.Balance != runs[0].Earned {
+		t.Errorf("balance = %d, recorded award = %d; the attempt was awarded twice", ctx.Balance, runs[0].Earned)
+	}
+}
+
+func TestPracticeEscapeAfterFinishingReturnsToMenu(t *testing.T) {
+	p := practiceOver(newTestContext(), "a")
+	finished, _ := p.Update(key("a"))
+
+	_, cmd := finished.(Practice).Update(key("esc"))
+	if cmd == nil {
+		t.Fatal("esc after finishing produced no navigation")
+	}
+	if _, ok := cmd().(navigateMsg).to.(Menu); !ok {
+		t.Errorf("esc after finishing navigated to %T, want Menu", cmd().(navigateMsg).to)
+	}
 }
 
 func TestPracticeFinishingNavigatesToResults(t *testing.T) {

@@ -5,9 +5,12 @@ package pg_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/Pikaryu729/typesafe/internal/cosmetics"
 	"github.com/Pikaryu729/typesafe/internal/store"
 	"github.com/Pikaryu729/typesafe/internal/store/pg"
 )
@@ -170,6 +173,116 @@ func TestConcurrentBuysSpendEachByteOnce(t *testing.T) {
 	}
 	if w, _ := repo.Wallet(ctx, u.ID); w.Balance != 0 {
 		t.Errorf("balance = %d, want 0; bytes were spent twice or not at all", w.Balance)
+	}
+}
+
+func TestAccountMergesWaitForRunsOnTheSameAccount(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepo(t)
+	target := fundedUser(t, repo, "SHA256:target", 0)
+	source := fundedUser(t, repo, "SHA256:source", 0)
+	code, err := repo.CreateLinkCode(ctx, target.ID)
+	if err != nil {
+		t.Fatalf("CreateLinkCode: %v", err)
+	}
+
+	release, err := repo.HoldAccountLock(ctx, source.ID)
+	if err != nil {
+		t.Fatalf("HoldAccountLock: %v", err)
+	}
+	t.Cleanup(release)
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- repo.RecordRun(ctx, store.Run{UserID: source.ID, Earned: 42})
+	}()
+	select {
+	case err := <-runDone:
+		t.Fatalf("RecordRun completed while the account was locked: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	if err := <-runDone; err != nil {
+		t.Fatalf("RecordRun: %v", err)
+	}
+
+	release, err = repo.HoldAccountLock(ctx, source.ID)
+	if err != nil {
+		t.Fatalf("HoldAccountLock: %v", err)
+	}
+	t.Cleanup(release)
+	mergeDone := make(chan error, 1)
+	go func() {
+		_, err := repo.RedeemLinkCode(ctx, code.Code, "SHA256:source")
+		mergeDone <- err
+	}()
+	select {
+	case err := <-mergeDone:
+		t.Fatalf("RedeemLinkCode completed while the account was locked: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	if err := <-mergeDone; err != nil {
+		t.Fatalf("RedeemLinkCode: %v", err)
+	}
+
+	runs, err := repo.RecentRuns(ctx, target.ID, 10)
+	if err != nil {
+		t.Fatalf("RecentRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Earned != 42 {
+		t.Errorf("merged runs = %+v, want the source run", runs)
+	}
+}
+
+func TestConcurrentWalletReadsAreSelfConsistent(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepo(t)
+	u := fundedUser(t, repo, "SHA256:wallet", 10000)
+
+	var (
+		readers sync.WaitGroup
+		buyers  sync.WaitGroup
+		fail    = make(chan error, 1)
+		once    sync.Once
+	)
+	for range 12 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for range 300 {
+				w, err := repo.Wallet(ctx, u.ID)
+				if err != nil {
+					once.Do(func() { fail <- err })
+					return
+				}
+				want := 10000
+				for _, o := range w.Owned {
+					want -= o.Price
+				}
+				if w.Balance != want {
+					once.Do(func() {
+						fail <- fmt.Errorf("wallet balance %d disagrees with owned cosmetics: want %d", w.Balance, want)
+					})
+					return
+				}
+			}
+		}()
+	}
+	for _, item := range cosmetics.Catalog {
+		buyers.Add(1)
+		go func(item cosmetics.Item) {
+			defer buyers.Done()
+			if _, err := repo.Buy(ctx, u.ID, store.Owned{ID: item.ID, Slot: string(item.Slot), Price: item.Price}); err != nil {
+				once.Do(func() { fail <- err })
+			}
+		}(item)
+	}
+	buyers.Wait()
+	readers.Wait()
+	select {
+	case err := <-fail:
+		t.Fatal(err)
+	default:
 	}
 }
 

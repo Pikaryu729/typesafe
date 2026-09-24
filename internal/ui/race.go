@@ -256,14 +256,19 @@ const nameWidth = 24
 // It does not pad: only the screens that put something after a name need a
 // column, and padTo is theirs to apply. The waiting room does not, and would
 // otherwise print a row of trailing spaces.
+//
+// The name is what gets cut to fit, never the suffixes: "(you)" is how a
+// player finds their own row.
 func renderName(s Styles, name string, f cosmetics.Flair, isYou bool) string {
+	var suffix string
 	if badge := f.BadgeText(); badge != "" {
-		name += " [" + badge + "]"
+		suffix += " [" + badge + "]"
 	}
 	if isYou {
-		name += " (you)"
+		suffix += " (you)"
 	}
-	return s.Name(f, s.Correct).Render(truncate(name, nameWidth))
+	name = truncate(name, max(1, nameWidth-len([]rune(suffix))))
+	return s.Name(f, s.Correct).Render(name + suffix)
 }
 
 // placeSuffix marks a racer who has already crossed the line.

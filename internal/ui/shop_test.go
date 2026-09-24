@@ -208,6 +208,9 @@ func TestShopRefreshesWalletAfterAnotherSessionOwnsAnItem(t *testing.T) {
 	if ctx.Balance != 180 {
 		t.Errorf("refreshed session balance = %d, want 180", ctx.Balance)
 	}
+	if after.note != "you already own that" {
+		t.Errorf("note after refresh = %q, want the refusal", after.note)
+	}
 }
 
 func TestShopTogglesAnOwnedItemOnAndOff(t *testing.T) {

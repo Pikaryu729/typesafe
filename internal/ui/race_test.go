@@ -336,3 +336,14 @@ func TestRaceResultsEscapeLeavesTheLobby(t *testing.T) {
 		t.Errorf("lobby holds %d players after leaving, want 1", got)
 	}
 }
+
+func TestRenderNameKeepsYouMarkerBesideABadge(t *testing.T) {
+	f := cosmetics.Flair{Badge: "badge-relentless"}
+	got := plain(renderName(newTestContext().Styles, "alexandra-longname", f, true))
+	if !strings.HasSuffix(got, "(you)") {
+		t.Errorf("renderName = %q, lost the (you) marker", got)
+	}
+	if n := len([]rune(got)); n > nameWidth {
+		t.Errorf("renderName = %q is %d wide, want at most %d", got, n, nameWidth)
+	}
+}

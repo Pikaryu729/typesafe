@@ -24,6 +24,11 @@ const (
 	practiceBaseMin, practiceBaseMax = 2, 4
 )
 
+// practiceMinAccuracy is the floor below which practice pays nothing. Wrong
+// characters still advance the cursor, so without it mashing keys through
+// passage after passage would be a way to farm bytes.
+const practiceMinAccuracy = 0.80
+
 // Placement pays for beating people, not merely for placing. The kicker
 // rewards the podium and beatenEach pays per racer left behind, so first of
 // five is worth well over first of two.
@@ -124,6 +129,10 @@ func AwardRace(rng *rand.Rand, in RaceInput) Award {
 // server still makes progress. It is deliberately a fraction of a race: the
 // competition is the point, and this is the floor under an empty lobby.
 func AwardPractice(rng *rand.Rand, wpm, accuracy float64) Award {
+	if accuracy < practiceMinAccuracy {
+		return Award{}
+	}
+
 	var b builder
 	b.add("base", between(rng, practiceBaseMin, practiceBaseMax))
 	b.add("accuracy bonus", accuracyBonus(accuracy, pracAccuracyTiers))

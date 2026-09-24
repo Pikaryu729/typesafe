@@ -204,3 +204,12 @@ func TestBaseIsActuallyRandom(t *testing.T) {
 		t.Errorf("the base was %v every time; it is meant to be random", seen)
 	}
 }
+
+func TestPracticeMashingEarnsNothing(t *testing.T) {
+	rng := testRand()
+	for range 200 {
+		if a := economy.AwardPractice(rng, 90, 0.1); !a.Empty() {
+			t.Fatalf("a mashed passage paid %+v", a)
+		}
+	}
+}

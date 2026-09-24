@@ -169,7 +169,11 @@ func (s Shop) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			// A wallet arriving alongside an error is a half-done action, not
 			// a broken shop: the purchase stands, only wearing it did not. Say
 			// so on the note line instead of replacing a usable screen.
-			s.note = msg.note
+			// A reload carries no note of its own; keep whatever explained
+			// why it was needed, such as a refusal.
+			if msg.note != "" {
+				s.note = msg.note
+			}
 			if msg.err != nil {
 				s.note = msg.note + " — could not wear it just now, press enter to try again"
 			}

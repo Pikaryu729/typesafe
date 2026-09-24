@@ -127,6 +127,7 @@ func (b Browser) create() (Screen, tea.Cmd) {
 	// Claim the lobby before navigating. Doing it here rather than in the
 	// waiting room means a client that drops in between is still cleaned up,
 	// instead of leaving an empty lobby nobody can close.
+	l.SetFlair(b.ctx.PlayerID, b.ctx.flair())
 	b.ctx.enterLobby(l)
 	return b, navigate(NewWaitingRoom(b.ctx, l))
 }
@@ -141,6 +142,7 @@ func (b Browser) join(code string) (Screen, tea.Cmd) {
 		b.err = err.Error()
 		return b, nil
 	}
+	l.SetFlair(b.ctx.PlayerID, b.ctx.flair())
 	b.ctx.enterLobby(l)
 	return b, navigate(NewWaitingRoom(b.ctx, l))
 }

@@ -7,6 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Pikaryu729/typesafe/internal/cosmetics"
+	"github.com/Pikaryu729/typesafe/internal/economy"
 	"github.com/Pikaryu729/typesafe/internal/lobby"
 	"github.com/Pikaryu729/typesafe/internal/typing"
 	"github.com/Pikaryu729/typesafe/internal/words"
@@ -98,8 +100,8 @@ func (r Race) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		return r, nil
 
 	case lobby.RaceEnded:
-		r.recordOwnResult(msg.Results)
-		return r, navigate(NewRaceResults(r.ctx, r.lobby, msg.Results))
+		award := r.recordOwnResult(msg.Results)
+		return r, navigate(NewRaceResults(r.ctx, r.lobby, msg.Results, award))
 
 	case tea.KeyMsg:
 		return r.handleKey(msg)
@@ -111,20 +113,41 @@ func (r Race) Update(msg tea.Msg) (Screen, tea.Cmd) {
 // session writes its own row, so the lobby package never needs to know that
 // persistence exists.
 //
-// A racer who did not reach the end is not recorded. Their speed over a
-// half-typed passage is not a result they would want counted among their
-// bests.
-func (r Race) recordOwnResult(results []lobby.Result) {
+// It returns what the finish paid, for the standings screen to break down. The
+// bytes are not a write of their own: they go into the run's row, so a race
+// still costs the typing path exactly one queued statement.
+//
+// A racer who did not reach the end is not recorded and earns nothing. Their
+// speed over a half-typed passage is not a result they would want counted
+// among their bests, and quitting should not be a way to make money.
+func (r Race) recordOwnResult(results []lobby.Result) economy.Award {
 	for _, res := range results {
 		if res.PlayerID != r.ctx.PlayerID {
 			continue
 		}
 		if !res.Finished {
-			return
+			return economy.Award{}
 		}
-		r.ctx.record(raceRun(r.seed, r.wordCount, r.lobby.Code(), res, r.sess.Stats()))
-		return
+
+		finishers := 0
+		for _, result := range results {
+			if result.Finished {
+				finishers++
+			}
+		}
+		award := r.ctx.awardRace(economy.RaceInput{
+			Place:    res.Place,
+			Racers:   finishers,
+			WPM:      res.WPM,
+			Accuracy: res.Accuracy,
+		})
+
+		run := raceRun(r.seed, r.wordCount, r.lobby.Code(), res, r.sess.Stats())
+		run.Earned = award.Total
+		r.ctx.record(run)
+		return award
 	}
+	return economy.Award{}
 }
 
 func (r Race) handleKey(msg tea.KeyMsg) (Screen, tea.Cmd) {
@@ -214,18 +237,38 @@ func (r Race) renderRacers() string {
 			style = s.StatValue
 		}
 
-		name := p.Name
-		if p.ID == r.ctx.PlayerID {
-			name += " (you)"
-		}
-
-		out.WriteString(fmt.Sprintf("%-18s %s %3.0f wpm%s\n",
-			truncate(name, 18),
-			style.Render(renderBar(float64(prog.chars)/float64(total))),
-			prog.wpm,
-			placeSuffix(s, p)))
+		out.WriteString(padTo(renderName(s, p.Name, p.Flair, p.ID == r.ctx.PlayerID), nameWidth))
+		out.WriteString(" ")
+		// The bar is drawn with this racer's own glyphs, not ours: a bought
+		// bar is something the rest of the lobby is meant to see.
+		out.WriteString(style.Render(renderBar(p.Flair, float64(prog.chars)/float64(total))))
+		out.WriteString(fmt.Sprintf(" %3.0f wpm%s\n", prog.wpm, placeSuffix(s, p)))
 	}
 	return out.String()
+}
+
+// nameWidth is the column names are padded to, so the bars beside them line up.
+const nameWidth = 24
+
+// renderName draws a player's name in whatever colour they have bought, with
+// their title beside it.
+//
+// It does not pad: only the screens that put something after a name need a
+// column, and padTo is theirs to apply. The waiting room does not, and would
+// otherwise print a row of trailing spaces.
+//
+// The name is what gets cut to fit, never the suffixes: "(you)" is how a
+// player finds their own row.
+func renderName(s Styles, name string, f cosmetics.Flair, isYou bool) string {
+	var suffix string
+	if badge := f.BadgeText(); badge != "" {
+		suffix += " [" + badge + "]"
+	}
+	if isYou {
+		suffix += " (you)"
+	}
+	name = truncate(name, max(1, nameWidth-len([]rune(suffix))))
+	return s.Name(f, s.Correct).Render(name + suffix)
 }
 
 // placeSuffix marks a racer who has already crossed the line.
@@ -236,16 +279,18 @@ func placeSuffix(s Styles, p lobby.PlayerState) string {
 	return "  " + s.Good.Render(ordinal(p.Place))
 }
 
-// renderBar draws a proportional bar, clamped to [0,1].
-func renderBar(frac float64) string {
+// renderBar draws a proportional bar, clamped to [0,1], with whichever glyphs
+// this racer has bought.
+func renderBar(f cosmetics.Flair, frac float64) string {
 	if frac < 0 {
 		frac = 0
 	}
 	if frac > 1 {
 		frac = 1
 	}
+	full, empty := f.BarGlyphs()
 	filled := int(frac * barWidth)
-	return strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+	return strings.Repeat(full, filled) + strings.Repeat(empty, barWidth-filled)
 }
 
 // ordinal renders a finishing place as 1st, 2nd, 3rd and so on.

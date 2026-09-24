@@ -232,6 +232,7 @@ func (l *Lobby) resultLocked(p *player) Result {
 	return Result{
 		PlayerID:   p.id,
 		Name:       p.name,
+		Flair:      p.flair,
 		Place:      p.place,
 		WPM:        p.wpm,
 		Accuracy:   p.accuracy,

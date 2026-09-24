@@ -24,6 +24,8 @@ import (
 	"math/rand/v2"
 	"sync"
 	"time"
+
+	"github.com/Pikaryu729/typesafe/internal/cosmetics"
 )
 
 // MaxPlayers caps a lobby. Racing is rendered as one progress bar per player,
@@ -87,6 +89,7 @@ func (p Phase) String() string {
 type PlayerState struct {
 	ID         string
 	Name       string
+	Flair      cosmetics.Flair
 	Ready      bool
 	CharsTyped int
 	WPM        float64
@@ -99,6 +102,7 @@ type PlayerState struct {
 type Result struct {
 	PlayerID   string
 	Name       string
+	Flair      cosmetics.Flair
 	Place      int // 0 if they did not finish
 	WPM        float64
 	Accuracy   float64
@@ -147,6 +151,7 @@ func (s Snapshot) AllReady() bool {
 type player struct {
 	id         string
 	name       string
+	flair      cosmetics.Flair
 	ready      bool
 	charsTyped int
 	wpm        float64
@@ -160,6 +165,7 @@ func (p *player) state() PlayerState {
 	return PlayerState{
 		ID:         p.id,
 		Name:       p.name,
+		Flair:      p.flair,
 		Ready:      p.ready,
 		CharsTyped: p.charsTyped,
 		WPM:        p.wpm,
@@ -245,6 +251,28 @@ func (l *Lobby) Join(playerID, name string) error {
 	l.broadcastLocked(LobbyUpdated{Snapshot: l.snapshotLocked()})
 	l.mu.Unlock()
 	return nil
+}
+
+// SetFlair records what this player's name and progress bar look like to
+// everyone else in the lobby.
+//
+// A lobby carries a Flair the way it carries a Name, and interprets neither:
+// both are opaque decoration that has to reach the other sessions somehow, and
+// this is the only channel between them. Keeping it out of Join means the
+// signature every caller already uses is unchanged, and it means a typist who
+// equips something between races is seen wearing it rather than going stale.
+//
+// A player who is not in this lobby is silently ignored, the same as Ready.
+func (l *Lobby) SetFlair(playerID string, f cosmetics.Flair) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	p := l.players[playerID]
+	if l.closed || p == nil || p.flair == f {
+		return
+	}
+	p.flair = f
+	l.broadcastLocked(LobbyUpdated{Snapshot: l.snapshotLocked()})
 }
 
 // Leave removes a player, promoting a new host if that was the host and

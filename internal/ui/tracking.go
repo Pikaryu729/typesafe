@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/Pikaryu729/typesafe/internal/cosmetics"
+	"github.com/Pikaryu729/typesafe/internal/economy"
 	"github.com/Pikaryu729/typesafe/internal/lobby"
 	"github.com/Pikaryu729/typesafe/internal/store"
 	"github.com/Pikaryu729/typesafe/internal/typing"
@@ -36,6 +38,53 @@ func (c *Context) record(run store.Run) {
 	//nolint:errcheck // there is no one to report this to mid-race; Async logs.
 	_ = c.Repo.RecordRun(context.Background(), run)
 }
+
+// applyWallet takes on a wallet the repository just handed back.
+//
+// It is the one place a balance and a set of cosmetics enter the session, so
+// re-theming the passage lives here too: equipping a theme in the shop has to
+// reach every screen built afterwards, and Context is shared by pointer, so
+// this is all the notifying anything needs.
+func (c *Context) applyWallet(w store.Wallet) {
+	c.Balance = w.Balance
+
+	c.Equipped = make(cosmetics.Equipped, len(cosmetics.Slots))
+	for _, slot := range cosmetics.Slots {
+		if id := w.EquippedIn(string(slot)); id != "" {
+			c.Equipped[slot] = id
+		}
+	}
+	c.Styles = c.baseStyles.Themed(c.Equipped[cosmetics.SlotTheme])
+}
+
+// awardRace returns what this player's finish paid, and adds it to the
+// session's balance.
+//
+// The bytes are not written here: they ride along on the Run that records the
+// attempt, which is the only write a finished race makes. An untracked session
+// earns nothing, because there is nowhere to keep it — the same rule that
+// makes its runs disappear.
+func (c *Context) awardRace(in economy.RaceInput) economy.Award {
+	if !c.tracking() {
+		return economy.Award{}
+	}
+	a := economy.AwardRace(c.rand, in)
+	c.Balance += a.Total
+	return a
+}
+
+// awardPractice is the solo counterpart of awardRace.
+func (c *Context) awardPractice(st typing.Stats) economy.Award {
+	if !c.tracking() {
+		return economy.Award{}
+	}
+	a := economy.AwardPractice(c.rand, st.WPM, st.Accuracy)
+	c.Balance += a.Total
+	return a
+}
+
+// flair is what other players in a lobby should see of this session.
+func (c *Context) flair() cosmetics.Flair { return c.Equipped.Flair() }
 
 // practiceRun builds a Run from a finished solo attempt.
 func practiceRun(seed int64, wordCount int, st typing.Stats) store.Run {

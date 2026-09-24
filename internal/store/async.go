@@ -28,12 +28,20 @@ var ErrClosed = errors.New("store: repository is closed")
 type Async struct {
 	Repository // reads pass straight through
 
-	runs    chan Run
+	queue   chan write
 	done    chan struct{}
 	onError func(error)
 
 	mu     sync.RWMutex
 	closed bool
+}
+
+// write is one item on the queue: a run to record, or a barrier that Flush is
+// waiting behind. One channel rather than two keeps the ordering that makes a
+// barrier mean anything — everything queued before it is drained first.
+type write struct {
+	run  Run
+	done chan struct{} // non-nil for a barrier; closed when the worker reaches it
 }
 
 // NewAsync returns an Async writing through to repo, buffering up to buffer
@@ -42,7 +50,7 @@ type Async struct {
 func NewAsync(repo Repository, buffer int, onError func(error)) *Async {
 	a := &Async{
 		Repository: repo,
-		runs:       make(chan Run, buffer),
+		queue:      make(chan write, buffer),
 		done:       make(chan struct{}),
 		onError:    onError,
 	}
@@ -67,11 +75,55 @@ func (a *Async) RecordRun(_ context.Context, run Run) error {
 	}
 
 	select {
-	case a.runs <- run:
+	case a.queue <- write{run: run}:
 		return nil
 	default:
 		a.report(errors.New("store: write queue full, run dropped"))
 		return nil
+	}
+}
+
+// Flush blocks until every write queued before this call has been attempted.
+//
+// It exists because a balance is derived from stored runs rather than kept in
+// a column: a session that has just banked an award and then reads its wallet
+// would otherwise race its own queued insert and read a figure from before it,
+// showing a balance that dips and briefly refusing a purchase the typist can
+// afford. Flushing first makes the read see the session's own writes.
+//
+// Callers are readers, which already run off the update loop inside a tea.Cmd,
+// so waiting here costs nothing that a read did not already cost.
+//
+// If the queue is full, Flush waits for room or until ctx expires. This is
+// intentionally a blocking operation: unlike RecordRun, a reader that needs
+// its own writes to be visible cannot safely proceed past pending writes.
+func (a *Async) Flush(ctx context.Context) error {
+	a.mu.RLock()
+	if a.closed {
+		a.mu.RUnlock()
+		return ErrClosed
+	}
+	barrier := make(chan struct{})
+	select {
+	case a.queue <- write{done: barrier}:
+	case <-a.done:
+		a.mu.RUnlock()
+		return nil
+	case <-ctx.Done():
+		a.mu.RUnlock()
+		return ctx.Err()
+	}
+	a.mu.RUnlock()
+
+	select {
+	case <-barrier:
+		return nil
+	case <-a.done:
+		// The worker stopped without reaching the barrier, so nothing further
+		// is going to land. Waiting longer would never end.
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -84,7 +136,7 @@ func (a *Async) Close() error {
 		return nil
 	}
 	a.closed = true
-	close(a.runs)
+	close(a.queue)
 	a.mu.Unlock()
 
 	<-a.done
@@ -94,9 +146,13 @@ func (a *Async) Close() error {
 func (a *Async) work() {
 	defer close(a.done)
 
-	for run := range a.runs {
+	for w := range a.queue {
+		if w.done != nil {
+			close(w.done)
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
-		if err := a.Repository.RecordRun(ctx, run); err != nil {
+		if err := a.Repository.RecordRun(ctx, w.run); err != nil {
 			a.report(err)
 		}
 		cancel()

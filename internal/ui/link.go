@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -17,7 +18,7 @@ import (
 // Two halves of one exchange: on the machine you are already known on, press
 // c for a code; on the new machine, type that code in. The second machine's
 // account — created the moment it first connected — is folded into the first,
-// so no history is lost either way round.
+// so the persisted history comes across with the account.
 type Link struct {
 	ctx *Context
 
@@ -35,8 +36,10 @@ type linkCodeMsg struct {
 }
 
 type linkedMsg struct {
-	user store.User
-	err  error
+	user   store.User
+	wallet store.Wallet
+	loaded bool
+	err    error
 }
 
 // NewLink returns the device-linking screen.
@@ -72,7 +75,7 @@ func (l Link) applyLinked(msg linkedMsg) Link {
 	case errors.Is(msg.err, store.ErrExpiredCode):
 		l.err = "that code has expired; make a new one"
 		return l
-	case msg.err != nil:
+	case msg.err != nil && msg.user.ID == "":
 		l.err = "could not link this device right now"
 		return l
 	}
@@ -82,7 +85,14 @@ func (l Link) applyLinked(msg linkedMsg) Link {
 	// every screen built afterwards sees the change.
 	l.ctx.User = msg.user
 	l.ctx.Username = msg.user.DisplayName
-	l.linkedTo, l.err = msg.user.DisplayName, ""
+	l.linkedTo = msg.user.DisplayName
+	if !msg.loaded {
+		l.ctx.applyWallet(store.Wallet{})
+		l.err = "linked, but could not load your wallet"
+		return l
+	}
+	l.ctx.applyWallet(msg.wallet)
+	l.err = ""
 	return l
 }
 
@@ -121,7 +131,7 @@ func (l Link) handleEntryKey(msg tea.KeyMsg) (Screen, tea.Cmd) {
 		}
 	case tea.KeyRunes:
 		for _, r := range msg.Runes {
-			if len(l.entry) < store.LinkCodeLength {
+			if r < utf8.RuneSelf && len(l.entry) < store.LinkCodeLength {
 				l.entry += strings.ToUpper(string(r))
 			}
 		}
@@ -146,8 +156,16 @@ func (l Link) redeem(code string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
 		defer cancel()
 
+		if err := store.Flush(ctx, repo); err != nil {
+			return linkedMsg{err: err}
+		}
+
 		user, err := repo.RedeemLinkCode(ctx, code, fingerprint)
-		return linkedMsg{user: user, err: err}
+		if err != nil {
+			return linkedMsg{err: err}
+		}
+		wallet, err := repo.Wallet(ctx, user.ID)
+		return linkedMsg{user: user, wallet: wallet, loaded: err == nil, err: err}
 	}
 }
 

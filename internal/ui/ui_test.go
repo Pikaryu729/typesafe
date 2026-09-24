@@ -2,6 +2,7 @@ package ui
 
 import (
 	"io"
+	"math/rand/v2"
 	"strings"
 	"testing"
 
@@ -16,27 +17,27 @@ import (
 // assertable.
 func testRenderer() *lipgloss.Renderer { return lipgloss.NewRenderer(io.Discard) }
 
+// testSeed makes award rolls repeat between runs, so a breakdown on screen is
+// something a test can assert exactly.
+const testSeed = 1
+
 func newTestContext() *Context {
-	return &Context{
-		Username: "tester",
-		PlayerID: "tester-id",
-		Store:    lobby.NewStore(),
-		Styles:   NewStyles(testRenderer()),
-		Width:    80,
-		Height:   24,
-	}
+	return newContext(testConfig())
 }
 
-func newTestRoot() Root {
-	return NewRoot(Config{
+func testConfig() Config {
+	return Config{
 		Username: "tester",
 		PlayerID: "tester-id",
 		Store:    lobby.NewStore(),
 		Renderer: testRenderer(),
 		Width:    80,
 		Height:   24,
-	})
+		Rand:     rand.New(rand.NewPCG(testSeed, 2)),
+	}
 }
+
+func newTestRoot() Root { return NewRoot(testConfig()) }
 
 // key builds the KeyMsg a terminal would produce for a named key.
 func key(name string) tea.KeyMsg {

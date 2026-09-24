@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Pikaryu729/typesafe/internal/lobby"
 	"github.com/Pikaryu729/typesafe/internal/store"
@@ -124,6 +125,32 @@ func TestRaceRecordsThisPlayersOwnResult(t *testing.T) {
 	}
 }
 
+func TestRacePaysOnlyForFinishersInTheLobby(t *testing.T) {
+	award := func(t *testing.T, guestFinished bool) int {
+		t.Helper()
+		host, guest := twoContexts()
+		repo := store.NewMemory()
+		user, err := repo.ResolveUser(context.Background(), "SHA256:host", host.Username)
+		if err != nil {
+			t.Fatalf("ResolveUser: %v", err)
+		}
+		host.Repo, host.User = repo, user
+		l, ev := racingLobby(t, host, guest)
+		r := NewRace(host, l, ev)
+		_, cmd := r.Update(lobby.RaceEnded{Results: []lobby.Result{
+			{PlayerID: host.PlayerID, Place: 1, WPM: 82, Accuracy: 0.94, Finished: true},
+			{PlayerID: guest.PlayerID, Place: 2, WPM: 70, Accuracy: 0.90, Finished: guestFinished},
+		}})
+		return cmd().(navigateMsg).to.(RaceResults).award.Total
+	}
+
+	idle := award(t, false)
+	duel := award(t, true)
+	if idle >= duel {
+		t.Errorf("winner with an idle lobby member earned %d, want less than a finished duel's %d", idle, duel)
+	}
+}
+
 func TestRaceDoesNotRecordAPlayerWhoDidNotFinish(t *testing.T) {
 	host, guest := twoContexts()
 
@@ -198,6 +225,152 @@ func TestLinkRedeemingACodeSwitchesTheSessionsAccount(t *testing.T) {
 	}
 	if got := plain(s.View()); !strings.Contains(got, "linked") {
 		t.Errorf("view does not confirm the link:\n%s", got)
+	}
+}
+
+func TestLinkFlushesQueuedRunsBeforeMergingAccounts(t *testing.T) {
+	bg := context.Background()
+	mem := store.NewMemory()
+	target, _ := mem.ResolveUser(bg, "SHA256:target", "laptop")
+	source, _ := mem.ResolveUser(bg, "SHA256:source", "desktop")
+	code, err := mem.CreateLinkCode(bg, target.ID)
+	if err != nil {
+		t.Fatalf("CreateLinkCode: %v", err)
+	}
+
+	repo := store.NewAsync(slowRepo{Repository: mem, delay: 100 * time.Millisecond}, 4, nil)
+	t.Cleanup(func() { _ = repo.Close() })
+	ctx := newTestContext()
+	ctx.Repo, ctx.User, ctx.Fingerprint = repo, source, "SHA256:source"
+	if err := repo.RecordRun(bg, store.Run{UserID: source.ID, Mode: store.ModePractice, WPM: 70}); err != nil {
+		t.Fatalf("RecordRun: %v", err)
+	}
+
+	screen, _ := NewLink(ctx).Update(key("enter"))
+	screen, _ = screen.Update(key(code.Code))
+	screen, cmd := screen.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("redeeming a code produced no command")
+	}
+	screen, _ = screen.Update(cmd())
+	if ctx.User.ID != target.ID {
+		t.Errorf("session account = %q, want target %q", ctx.User.ID, target.ID)
+	}
+
+	runs, err := mem.RecentRuns(bg, target.ID, 10)
+	if err != nil {
+		t.Fatalf("RecentRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Errorf("merged account has %d runs, want the queued source run", len(runs))
+	}
+}
+
+func TestLinkReloadsTheMergedWallet(t *testing.T) {
+	bg := context.Background()
+	repo := store.NewMemory()
+	target, _ := repo.ResolveUser(bg, "SHA256:target", "laptop")
+	source, _ := repo.ResolveUser(bg, "SHA256:source", "desktop")
+	if err := repo.RecordRun(bg, store.Run{UserID: target.ID, Earned: 50}); err != nil {
+		t.Fatalf("target RecordRun: %v", err)
+	}
+	if err := repo.RecordRun(bg, store.Run{UserID: source.ID, Earned: 300}); err != nil {
+		t.Fatalf("source RecordRun: %v", err)
+	}
+	if _, err := repo.Buy(bg, source.ID, store.Owned{ID: "bar-dots", Slot: "bar", Price: 120}); err != nil {
+		t.Fatalf("Buy: %v", err)
+	}
+	if _, err := repo.Equip(bg, source.ID, "bar", "bar-dots"); err != nil {
+		t.Fatalf("Equip: %v", err)
+	}
+	code, err := repo.CreateLinkCode(bg, target.ID)
+	if err != nil {
+		t.Fatalf("CreateLinkCode: %v", err)
+	}
+
+	ctx := newTestContext()
+	ctx.Repo, ctx.User, ctx.Fingerprint = repo, source, "SHA256:source"
+	wallet, _ := repo.Wallet(bg, source.ID)
+	ctx.applyWallet(wallet)
+
+	screen, _ := NewLink(ctx).Update(key("enter"))
+	screen, _ = screen.Update(key(code.Code))
+	screen, cmd := screen.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("redeeming a code produced no command")
+	}
+	screen, _ = screen.Update(cmd())
+	if ctx.User.ID != target.ID {
+		t.Errorf("session account = %q, want target %q", ctx.User.ID, target.ID)
+	}
+	if ctx.Balance != 230 {
+		t.Errorf("merged balance = %d, want 230", ctx.Balance)
+	}
+	if got := ctx.flair().Bar; got != "" {
+		t.Errorf("merged flair still wears %q, want the moved cosmetic unequipped", got)
+	}
+	if got := plain(screen.View()); !strings.Contains(got, "linked") {
+		t.Errorf("link screen does not confirm the merge:\n%s", got)
+	}
+}
+
+func TestLinkClearsWalletWhenMergedWalletCannotLoad(t *testing.T) {
+	bg := context.Background()
+	repo := store.NewMemory()
+	target, _ := repo.ResolveUser(bg, "SHA256:target", "laptop")
+	source, _ := repo.ResolveUser(bg, "SHA256:source", "desktop")
+	if err := repo.RecordRun(bg, store.Run{UserID: source.ID, Earned: 300}); err != nil {
+		t.Fatalf("RecordRun: %v", err)
+	}
+	if _, err := repo.Buy(bg, source.ID, store.Owned{ID: "bar-dots", Slot: "bar", Price: 120}); err != nil {
+		t.Fatalf("Buy: %v", err)
+	}
+	if _, err := repo.Equip(bg, source.ID, "bar", "bar-dots"); err != nil {
+		t.Fatalf("Equip: %v", err)
+	}
+	code, err := repo.CreateLinkCode(bg, target.ID)
+	if err != nil {
+		t.Fatalf("CreateLinkCode: %v", err)
+	}
+
+	ctx := newTestContext()
+	ctx.Repo, ctx.User, ctx.Fingerprint = repo, source, "SHA256:source"
+	wallet, _ := repo.Wallet(bg, source.ID)
+	ctx.applyWallet(wallet)
+	ctx.Repo = failingRepo{Repository: repo}
+
+	screen, _ := NewLink(ctx).Update(key("enter"))
+	screen, _ = screen.Update(key(code.Code))
+	screen, cmd := screen.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("redeeming a code produced no command")
+	}
+	screen, _ = screen.Update(cmd())
+
+	if ctx.User.ID != target.ID {
+		t.Errorf("session account = %q, want target %q", ctx.User.ID, target.ID)
+	}
+	if ctx.Balance != 0 {
+		t.Errorf("stale merged balance = %d, want zero", ctx.Balance)
+	}
+	if got := ctx.flair().Bar; got != "" {
+		t.Errorf("stale merged flair wears %q, want empty", got)
+	}
+	if got := plain(screen.View()); !strings.Contains(got, "could not load your wallet") {
+		t.Errorf("view does not report the wallet failure:\n%s", got)
+	}
+}
+
+func TestLinkRejectsNonASCIICodeInput(t *testing.T) {
+	ctx, _ := trackedContext(t)
+
+	s, _ := send(NewLink(ctx), "enter", "é界é")
+	link := s.(Link)
+	if link.entry != "" {
+		t.Errorf("non-ASCII input entered %q", link.entry)
+	}
+	if got := plain(link.View()); !strings.Contains(got, "______") {
+		t.Errorf("link prompt width changed after non-ASCII input:\n%s", got)
 	}
 }
 

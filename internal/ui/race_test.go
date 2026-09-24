@@ -7,6 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Pikaryu729/typesafe/internal/cosmetics"
+	"github.com/Pikaryu729/typesafe/internal/economy"
 	"github.com/Pikaryu729/typesafe/internal/lobby"
 	"github.com/Pikaryu729/typesafe/internal/words"
 )
@@ -232,11 +234,11 @@ func TestRenderBarClampsAndFills(t *testing.T) {
 		{-1, 0, "negative is clamped"},
 	}
 	for _, tt := range tests {
-		bar := renderBar(tt.frac)
+		bar := renderBar(cosmetics.Flair{}, tt.frac)
 		if got := len([]rune(bar)); got != barWidth {
 			t.Errorf("%s: bar is %d cells wide, want %d", tt.label, got, barWidth)
 		}
-		if got := strings.Count(bar, "█"); got != tt.want {
+		if got := strings.Count(bar, cosmetics.DefaultFilled); got != tt.want {
 			t.Errorf("%s: %d cells filled, want %d", tt.label, got, tt.want)
 		}
 	}
@@ -265,7 +267,7 @@ func TestRaceResultsShowStandings(t *testing.T) {
 			Elapsed: 9500 * time.Millisecond, Finished: true},
 		{PlayerID: guest.PlayerID, Name: "bob", Finished: false},
 	}
-	view := plain(NewRaceResults(host, l, results).View())
+	view := plain(NewRaceResults(host, l, results, economy.Award{}).View())
 
 	for _, want := range []string{"1st", "alice", "82 wpm", "97%", "9.5s", "bob", "did not finish"} {
 		if !strings.Contains(view, want) {
@@ -284,7 +286,7 @@ func TestRaceResultsRematchIsHostOnly(t *testing.T) {
 		typeInto(r, r.sess.Target())
 	}
 
-	res := NewRaceResults(guest, l, l.Results())
+	res := NewRaceResults(guest, l, l.Results(), economy.Award{})
 	updated, _ := res.Update(key("enter"))
 
 	if got := plain(updated.View()); !strings.Contains(got, "only the host") {
@@ -305,14 +307,14 @@ func TestRaceResultsHostRematchReturnsEveryoneToTheRoom(t *testing.T) {
 	}
 
 	// The host calls it...
-	res := NewRaceResults(host, l, l.Results())
+	res := NewRaceResults(host, l, l.Results(), economy.Award{})
 	res.Update(key("enter"))
 	if got := l.Snapshot().Phase; got != lobby.PhaseWaiting {
 		t.Fatalf("Phase = %v after a rematch, want waiting", got)
 	}
 
 	// ...and the resulting update is what moves the other player.
-	guestRes := Screen(NewRaceResults(guest, l, l.Results()))
+	guestRes := Screen(NewRaceResults(guest, l, l.Results(), economy.Award{}))
 	_, cmd := guestRes.Update(lobby.LobbyUpdated{Snapshot: l.Snapshot()})
 
 	if _, ok := cmd().(navigateMsg).to.(WaitingRoom); !ok {
@@ -325,12 +327,23 @@ func TestRaceResultsEscapeLeavesTheLobby(t *testing.T) {
 	l := host.Store.Create(host.PlayerID, host.Username)
 	l.Join(guest.PlayerID, guest.Username)
 
-	_, cmd := NewRaceResults(guest, l, nil).Update(key("esc"))
+	_, cmd := NewRaceResults(guest, l, nil, economy.Award{}).Update(key("esc"))
 
 	if _, ok := cmd().(navigateMsg).to.(Browser); !ok {
 		t.Error("esc did not return to the browser")
 	}
 	if got := len(l.Snapshot().Players); got != 1 {
 		t.Errorf("lobby holds %d players after leaving, want 1", got)
+	}
+}
+
+func TestRenderNameKeepsYouMarkerBesideABadge(t *testing.T) {
+	f := cosmetics.Flair{Badge: "badge-relentless"}
+	got := plain(renderName(newTestContext().Styles, "alexandra-longname", f, true))
+	if !strings.HasSuffix(got, "(you)") {
+		t.Errorf("renderName = %q, lost the (you) marker", got)
+	}
+	if n := len([]rune(got)); n > nameWidth {
+		t.Errorf("renderName = %q is %d wide, want at most %d", got, n, nameWidth)
 	}
 }

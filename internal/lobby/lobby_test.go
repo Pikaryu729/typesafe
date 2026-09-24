@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Pikaryu729/typesafe/internal/cosmetics"
 )
 
 // testStore returns a store with a deterministic source, so join codes and
@@ -159,6 +161,72 @@ func TestSetReady(t *testing.T) {
 	if !l.Snapshot().AllReady() {
 		t.Error("AllReady is false once everyone has readied")
 	}
+}
+
+func TestSetFlairReachesTheOtherPlayers(t *testing.T) {
+	l := testStore().Create("h1", "host")
+	l.Join("p2", "bob")
+	ch := l.Subscribe("h1")
+
+	want := cosmetics.Flair{Color: "color-gold", Badge: "badge-swift", Bar: "bar-dots"}
+	l.SetFlair("p2", want)
+
+	if got := l.Snapshot().Players[1].Flair; got != want {
+		t.Errorf("bob's flair is %+v, want %+v", got, want)
+	}
+
+	// The other sessions have to be told, or they keep rendering the old one.
+	events := drain(ch)
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1: %+v", len(events), events)
+	}
+	upd, ok := events[0].(LobbyUpdated)
+	if !ok {
+		t.Fatalf("got %T, want LobbyUpdated", events[0])
+	}
+	if got := upd.Snapshot.Players[1].Flair; got != want {
+		t.Errorf("the broadcast snapshot carries %+v, want %+v", got, want)
+	}
+}
+
+func TestSetFlairIsQuietWhenNothingChanged(t *testing.T) {
+	l := testStore().Create("h1", "host")
+	f := cosmetics.Flair{Bar: "bar-dots"}
+	l.SetFlair("h1", f)
+
+	ch := l.Subscribe("h1")
+	l.SetFlair("h1", f)
+	l.SetFlair("nobody-here", cosmetics.Flair{Bar: "bar-shade"})
+
+	if events := drain(ch); len(events) != 0 {
+		t.Errorf("re-setting the same flair broadcast %+v", events)
+	}
+}
+
+func TestResultsCarryFlair(t *testing.T) {
+	l := readyLobby(t, raceStore(), 2)
+
+	want := cosmetics.Flair{Color: "color-gold"}
+	l.SetFlair("host", want)
+
+	ch := l.Subscribe("host")
+	if err := l.Start("host"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	collectUntil(t, l, ch, PhaseRacing)
+	l.Finish("host", 100, 80, 0.97)
+	l.Finish("p1", 100, 70, 0.95)
+
+	for _, res := range l.Results() {
+		if res.PlayerID != "host" {
+			continue
+		}
+		if res.Flair != want {
+			t.Errorf("the standings carry %+v, want %+v", res.Flair, want)
+		}
+		return
+	}
+	t.Fatal("the host is missing from the standings")
 }
 
 func TestAllReadyNeedsTwoPlayers(t *testing.T) {

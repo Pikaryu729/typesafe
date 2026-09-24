@@ -71,8 +71,10 @@ of lines inline.
 cmd/server/          entrypoint: flags, host key, middleware chain, shutdown, session renderer
 internal/words/      embedded word list, seeded passage generation   (pure)
 internal/typing/     keystroke-level engine: WPM, accuracy, progress (pure)
+internal/economy/    what a finished attempt pays, in bytes          (pure)
+internal/cosmetics/  the catalogue bytes are spent on                (pure)
 internal/lobby/      server-shared state: registry, lobbies, pub/sub (pure, concurrent)
-internal/store/      accounts and finished runs: interface, memory, async wrapper (pure)
+internal/store/      accounts, runs and wallets: interface, memory, async wrapper (pure)
 internal/store/pg/   the PostgreSQL implementation and its migrations
 internal/ui/         Bubble Tea models: router plus one per screen
 ```
@@ -171,7 +173,7 @@ so a client dropping in between does not strand an empty lobby.
 
 **Live state is in memory; history is in Postgres.** Lobbies, races and the state of an
 in-flight attempt still live in process memory and reset on restart — `lobby.Store` is
-unchanged. What survives is accounts and finished runs, in `internal/store`.
+unchanged. What survives is accounts, finished runs and wallets, in `internal/store`.
 
 - `internal/store` — `Repository`, the types, `Memory` (used by every test) and `Async`. Pure,
   no Bubble Tea.
@@ -192,18 +194,51 @@ Three rules hold this together:
 2. **Every use of `Context.Repo` must tolerate nil,** which is what `Context.tracking()` is for.
    An anonymous session types and races normally; it just has no history.
 3. **`internal/lobby` knows nothing about persistence.** A race is recorded by each session
-   writing its own result on `RaceEnded`, not by the lobby writing everyone's.
+   writing its own result on `RaceEnded`, not by the lobby writing everyone's. It carries a
+   `cosmetics.Flair` per player for the same reason it carries a name — the other sessions have
+   to see it somehow — and interprets neither.
+
+## Bytes and cosmetics
+
+`internal/economy` decides what an attempt pays; `internal/cosmetics` is the catalogue it is
+spent on. Both are pure, both are tables of constants, and both take their randomness by
+argument so an award is assertable. Race placement rewards count only racers who finish;
+idle lobby members add no beaten-racer bonus.
+
+Three rules here too:
+
+1. **A balance is derived, never stored.** `store.Balance` is everything earned less everything
+   bought, and there is no column holding a total that could drift from it. It is the second
+   definition living in two implementations — see `store.Summarize` below; the same rule applies
+   and the same integration test guards it.
+2. **Earnings ride in the run's own row.** `store.Run.Earned` is set by the session that records
+   the attempt, so a finished race still costs the typing path exactly one queued statement and
+   a run can never disagree with what it paid. Do not add a second write here.
+
+   The cost of that is a write the session has not seen land. **A reader that must observe the
+   session's own recent writes calls `store.Flush` first** — `Async` queues, so a wallet read
+   issued straight after an award would otherwise derive a balance from before it, dip on screen
+   and briefly refuse an affordable purchase. `Flush` is an optional interface, so it is a no-op
+   for `Memory` and `pg.Repo`, which have already written by the time they return.
+3. **A purchase records the price as paid.** Repricing the catalogue must not reach backwards
+   into anyone's balance. `Buy` is atomic under an advisory lock on the account, because one
+   person can hold several sessions and really can spend the same bytes twice.
+
+The link-code merge has to fold wallets as well as runs: a cosmetic the target already owns is
+dropped rather than moved — which refunds it, since the balance is derived — and everything that
+moves arrives unequipped.
 
 ### Identity
 
 The SSH public key fingerprint is the account. `cmd/server/main.go` computes it in the auth
 callback — still accepting every key — and stashes it on the `ssh.Context`; the session resolves
 it to an account, creating one on a first connection. Several keys can point at one account
-through a link code, which merges the two accounts (runs and keys move, the emptied one is
-deleted).
+through a link code, which merges the two accounts (runs, cosmetics and keys move, the emptied
+one is deleted).
 
-`store.Summarize` is the definition of what the profile figures mean. `Memory` calls it; the SQL
-recomputes it; the integration tests assert the two agree. Change one and you must change both.
+`store.Summarize` is the definition of what the profile figures mean, and `store.Balance` is the
+definition of what a balance means. `Memory` calls each; the SQL recomputes each; the integration
+tests assert the two agree. Change one and you must change both.
 
 ## Conventions
 

@@ -1,6 +1,10 @@
 package ui
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 // Layout fragments every screen shares, so headers and help lines stay
 // consistent without each screen re-deriving them.
@@ -58,6 +62,19 @@ func (c *Context) passageLines() int {
 		return maxPassageLines
 	}
 	return n
+}
+
+// padTo right-pads an already-styled cell to n printable columns.
+//
+// Styled text cannot be padded with %-*s: a style's escape codes count as
+// bytes but occupy no space on screen, so every coloured cell would come out
+// short by however many bytes its escapes took and the column would stagger.
+// lipgloss.Width measures what is actually visible.
+func padTo(s string, n int) string {
+	if w := lipgloss.Width(s); w < n {
+		return s + strings.Repeat(" ", n-w)
+	}
+	return s
 }
 
 // stat renders one figure with its label, e.g. "82 wpm".

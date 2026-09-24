@@ -1,12 +1,14 @@
 package ui
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Pikaryu729/typesafe/internal/economy"
 	"github.com/Pikaryu729/typesafe/internal/typing"
 )
 
@@ -78,6 +80,47 @@ func TestPracticeIgnoresAltCombinations(t *testing.T) {
 
 	if got := s.(Practice).sess.Stats().Keystrokes; got != 0 {
 		t.Errorf("Keystrokes = %d, want 0; alt-combinations are shortcuts", got)
+	}
+}
+
+func TestPracticeDoesNotRecordAQueuedKeyTwiceAfterFinishing(t *testing.T) {
+	ctx, repo := trackedContext(t)
+	p := practiceOver(ctx, "a")
+
+	finished, cmd := p.Update(key("a"))
+	if cmd == nil {
+		t.Fatal("finishing the passage produced no navigation")
+	}
+	stillPractice, lateCmd := finished.(Practice).Update(key("x"))
+	if lateCmd != nil {
+		t.Fatal("a key after finishing produced a second navigation")
+	}
+	if _, ok := stillPractice.(Practice); !ok {
+		t.Fatalf("late key changed screen to %T", stillPractice)
+	}
+
+	runs, err := repo.RecentRuns(context.Background(), ctx.User.ID, 10)
+	if err != nil {
+		t.Fatalf("RecentRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Errorf("got %d recorded attempts, want 1", len(runs))
+	}
+	if len(runs) == 1 && ctx.Balance != runs[0].Earned {
+		t.Errorf("balance = %d, recorded award = %d; the attempt was awarded twice", ctx.Balance, runs[0].Earned)
+	}
+}
+
+func TestPracticeEscapeAfterFinishingReturnsToMenu(t *testing.T) {
+	p := practiceOver(newTestContext(), "a")
+	finished, _ := p.Update(key("a"))
+
+	_, cmd := finished.(Practice).Update(key("esc"))
+	if cmd == nil {
+		t.Fatal("esc after finishing produced no navigation")
+	}
+	if _, ok := cmd().(navigateMsg).to.(Menu); !ok {
+		t.Errorf("esc after finishing navigated to %T, want Menu", cmd().(navigateMsg).to)
 	}
 }
 
@@ -168,7 +211,7 @@ func TestPracticeViewShowsPassageAndStats(t *testing.T) {
 }
 
 func TestResultsRetryStartsNewPractice(t *testing.T) {
-	res := newResults(newTestContext(), typing.Stats{})
+	res := newResults(newTestContext(), typing.Stats{}, economy.Award{})
 	_, cmd := res.Update(key("r"))
 
 	if _, ok := cmd().(navigateMsg).to.(Practice); !ok {
@@ -177,7 +220,7 @@ func TestResultsRetryStartsNewPractice(t *testing.T) {
 }
 
 func TestResultsEscapeReturnsToMenu(t *testing.T) {
-	res := newResults(newTestContext(), typing.Stats{})
+	res := newResults(newTestContext(), typing.Stats{}, economy.Award{})
 	_, cmd := res.Update(key("esc"))
 
 	if _, ok := cmd().(navigateMsg).to.(Menu); !ok {
@@ -190,7 +233,7 @@ func TestResultsViewShowsTheFigures(t *testing.T) {
 		WPM: 82.4, RawWPM: 90.1, Accuracy: 0.955,
 		Elapsed: 12300 * time.Millisecond, Correct: 100, Incorrect: 5, Keystrokes: 110,
 	}
-	view := plain(newResults(newTestContext(), stats).View())
+	view := plain(newResults(newTestContext(), stats, economy.Award{}).View())
 
 	for _, want := range []string{"82", "96%", "12.3s", "100 correct", "5 wrong", "110 keystrokes", "90 raw wpm"} {
 		if !strings.Contains(view, want) {

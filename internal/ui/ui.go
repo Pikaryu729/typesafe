@@ -7,8 +7,11 @@
 package ui
 
 import (
+	"math/rand/v2"
+
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Pikaryu729/typesafe/internal/cosmetics"
 	"github.com/Pikaryu729/typesafe/internal/lobby"
 	"github.com/Pikaryu729/typesafe/internal/store"
 )
@@ -31,13 +34,31 @@ type Context struct {
 	// Fingerprint is this session's public key, needed to attach it to another
 	// account when a link code is redeemed.
 	Fingerprint string
-	// Repo persists accounts and runs, or is nil when there is no database.
+	// Repo persists accounts, runs and wallets, or is nil when there is no
+	// database.
 	// Every use must tolerate nil: practising and racing do not depend on it.
 	Repo store.Repository
-	// Styles is scoped to this session's terminal. See NewStyles.
+	// Balance is this session's bytes, kept here so the menu can show a figure
+	// without a query. It is loaded once at connect and moved by the two
+	// things that move it: an award at the end of an attempt, and a purchase.
+	Balance int
+	// Equipped is what this typist is wearing. The visible part travels to
+	// other players through lobby.SetFlair; the passage theme is applied to
+	// Styles and goes nowhere.
+	Equipped cosmetics.Equipped
+	// Styles is scoped to this session's terminal, and themed by whatever is
+	// equipped. See NewStyles.
 	Styles Styles
+	// baseStyles is Styles before a theme was applied, so equipping a
+	// different one starts from the app's own colours rather than compounding.
+	baseStyles Styles
 	// Width and Height track the client's terminal, updated on resize.
 	Width, Height int
+
+	// rand is this session's source for award rolls. One per session, used
+	// only on the update loop's goroutine, so it needs no synchronisation —
+	// a package-level generator would need it and would not be assertable.
+	rand *rand.Rand
 
 	// send delivers a message into this session's Bubble Tea program from
 	// outside its update loop. See SetSender.

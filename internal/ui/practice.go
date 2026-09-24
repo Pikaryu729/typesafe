@@ -70,7 +70,13 @@ func (p Practice) handleKey(msg tea.KeyMsg) (Screen, tea.Cmd) {
 
 	case tea.KeyTab, tea.KeyCtrlR:
 		return NewPractice(p.ctx), tick() // a different passage, not a replay
+	}
 
+	if p.sess.Finished() {
+		return p, nil
+	}
+
+	switch msg.Type {
 	case tea.KeyBackspace:
 		p.sess.Backspace()
 		return p, nil
@@ -92,8 +98,12 @@ func (p Practice) handleKey(msg tea.KeyMsg) (Screen, tea.Cmd) {
 
 	if p.sess.Finished() {
 		st := p.sess.Stats()
-		p.ctx.record(practiceRun(p.seed, practiceWords, st))
-		return p, navigate(newResults(p.ctx, st))
+		award := p.ctx.awardPractice(st)
+
+		run := practiceRun(p.seed, practiceWords, st)
+		run.Earned = award.Total
+		p.ctx.record(run)
+		return p, navigate(newResults(p.ctx, st, award))
 	}
 	return p, nil
 }
